@@ -71,12 +71,4 @@
     },
     "windows": {}
   },
-  "plugins": {
-    "updater": {
-      "pubkey": "",
-      "endpoints": [
-        "https://github.com/Melvynx/Parler/releases/latest/download/latest.json"
-      ]
-    }
-  }
-}
+  "plugins": {}
