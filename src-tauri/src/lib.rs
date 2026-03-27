@@ -475,12 +475,21 @@ pub fn run(cli_args: CliArgs) {
         })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
-                let _res = window.hide();
-
                 let tray_visible =
                     TRAY_ICON_ENABLED.load(Ordering::Relaxed)
                         && !window.app_handle().state::<CliArgs>().no_tray;
+
+                #[cfg(target_os = "windows")]
+                {
+                    if !tray_visible {
+                        // No tray icon on Windows: quit the app since there's no way to reopen
+                        window.app_handle().exit(0);
+                        return;
+                    }
+                }
+
+                api.prevent_close();
+                let _res = window.hide();
 
                 #[cfg(target_os = "macos")]
                 {

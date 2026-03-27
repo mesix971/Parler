@@ -126,7 +126,46 @@ fn is_system_muted() -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn is_system_muted() -> bool {
+    unsafe {
+        use windows::Win32::{
+            Media::Audio::{
+                eMultimedia, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator,
+                MMDeviceEnumerator,
+            },
+            System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED},
+        };
+
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                Ok(e) => e,
+                Err(_) => return false,
+            };
+        let device = match enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let volume: IAudioEndpointVolume =
+            match device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+        if volume.GetMute().unwrap_or(false.into()).as_bool() {
+            return true;
+        }
+
+        // Also check if volume is at 0
+        match volume.GetMasterVolumeLevelScalar() {
+            Ok(level) => level <= 0.0001,
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn is_system_muted() -> bool {
     false
 }

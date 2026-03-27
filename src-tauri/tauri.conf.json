@@ -69,7 +69,14 @@
         "files": {}
       }
     },
-    "windows": {}
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   },
   "plugins": {}
 }
