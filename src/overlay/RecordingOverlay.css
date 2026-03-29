@@ -147,6 +147,32 @@
   }
 }
 
+.action-name {
+  margin-left: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  white-space: nowrap;
+  animation: action-name-fade 1.5s ease-out forwards;
+}
+
+@keyframes action-name-fade {
+  0% {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  15% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 .cancel-confirm-text {
   color: rgba(255, 255, 255, 0.7);
   font-size: 10px;

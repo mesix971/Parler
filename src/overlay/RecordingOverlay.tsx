@@ -163,9 +163,11 @@ const RecordingOverlay: React.FC = () => {
   const [state, setState] = useState<OverlayState>("recording");
   const [timerStart, setTimerStart] = useState(0);
   const [selectedAction, setSelectedAction] = useState<ActionInfo | null>(null);
+  const [showActionName, setShowActionName] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const cancelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const actionNameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pauseStartRef = useRef<number>(0);
   const direction = getLanguageDirection(i18n.language);
 
@@ -220,11 +222,24 @@ const RecordingOverlay: React.FC = () => {
         "action-selected",
         (event) => {
           setSelectedAction(event.payload);
+          setShowActionName(true);
+          if (actionNameTimerRef.current) {
+            clearTimeout(actionNameTimerRef.current);
+          }
+          actionNameTimerRef.current = setTimeout(() => {
+            setShowActionName(false);
+            actionNameTimerRef.current = null;
+          }, 1500);
         },
       );
 
       const unlistenDeselect = await listen("action-deselected", () => {
         setSelectedAction(null);
+        setShowActionName(false);
+        if (actionNameTimerRef.current) {
+          clearTimeout(actionNameTimerRef.current);
+          actionNameTimerRef.current = null;
+        }
       });
 
       const unlistenPause = await listen<boolean>(
@@ -281,7 +296,12 @@ const RecordingOverlay: React.FC = () => {
       </div>
 
       {selectedAction && state === "recording" && (
-        <div className="action-badge">{selectedAction.key}</div>
+        <div className="action-badge">
+          {selectedAction.key}
+          {showActionName && (
+            <span className="action-name">{selectedAction.name}</span>
+          )}
+        </div>
       )}
 
       <div className="overlay-middle">
