@@ -164,6 +164,7 @@ const RecordingOverlay: React.FC = () => {
   const [timerStart, setTimerStart] = useState(0);
   const [selectedAction, setSelectedAction] = useState<ActionInfo | null>(null);
   const [showActionName, setShowActionName] = useState(false);
+  const [actionNameKey, setActionNameKey] = useState(0);
   const [cancelPending, setCancelPending] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const cancelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -222,6 +223,7 @@ const RecordingOverlay: React.FC = () => {
         "action-selected",
         (event) => {
           setSelectedAction(event.payload);
+          setActionNameKey((k) => k + 1);
           setShowActionName(true);
           if (actionNameTimerRef.current) {
             clearTimeout(actionNameTimerRef.current);
@@ -229,7 +231,7 @@ const RecordingOverlay: React.FC = () => {
           actionNameTimerRef.current = setTimeout(() => {
             setShowActionName(false);
             actionNameTimerRef.current = null;
-          }, 1500);
+          }, 2000);
         },
       );
 
@@ -287,22 +289,24 @@ const RecordingOverlay: React.FC = () => {
   }, []);
 
   return (
-    <div
-      dir={direction}
-      className={`recording-overlay state-${state} ${isVisible ? "is-visible" : "is-hidden"}`}
-    >
-      <div className="overlay-left">
-        {state === "recording" ? <MicIcon /> : <DotsIcon />}
-      </div>
-
-      {selectedAction && state === "recording" && (
-        <div className="action-badge">
-          {selectedAction.key}
-          {showActionName && (
-            <span className="action-name">{selectedAction.name}</span>
-          )}
+    <div className={`overlay-wrapper ${isVisible ? "is-visible" : "is-hidden"}`}>
+      {showActionName && selectedAction && state === "recording" && (
+        <div key={actionNameKey} className="action-toast">
+          <span className="action-toast-key">{selectedAction.key}</span>
+          <span className="action-toast-name">{selectedAction.name}</span>
         </div>
       )}
+      <div
+        dir={direction}
+        className={`recording-overlay state-${state}`}
+      >
+        <div className="overlay-left">
+          {state === "recording" ? <MicIcon /> : <DotsIcon />}
+        </div>
+
+        {selectedAction && state === "recording" && (
+          <div className="action-badge">{selectedAction.key}</div>
+        )}
 
       <div className="overlay-middle">
         {state === "recording" && !cancelPending && (
@@ -336,6 +340,7 @@ const RecordingOverlay: React.FC = () => {
           </>
         )}
       </div>
+    </div>
     </div>
   );
 };
