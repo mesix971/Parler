@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { AudioPlayer } from "../../ui/AudioPlayer";
 import { Button } from "../../ui/Button";
 import {
@@ -14,10 +15,15 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { readFile } from "@tauri-apps/plugin-fs";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { commands, type HistoryEntry } from "@/bindings";
 import { formatDateTime } from "@/utils/dateFormat";
 import { useOsType } from "@/hooks/useOsType";
+import { useSettings } from "@/hooks/useSettings";
 import { useModelStore } from "@/stores/modelStore";
+import { unwrap } from "@/lib/utils/result";
+import { formatKeyCombination } from "@/lib/utils/keyboard";
+import { getTranslatedModelName } from "@/lib/utils/modelTranslation";
 
 interface OpenRecordingsButtonProps {
   onClick: () => void;
@@ -35,23 +41,49 @@ const OpenRecordingsButton: React.FC<OpenRecordingsButtonProps> = ({
     className="flex items-center gap-2"
     title={label}
   >
-    <FolderOpen className="w-4 h-4" />
+    <FolderOpen className="w-4 h-4" aria-hidden />
     <span>{label}</span>
   </Button>
 );
 
+/** En-tête et cadre communs aux trois états de la page (chargement, vide, liste). */
+const HistoryLayout: React.FC<{
+  onOpenFolder: () => void;
+  children: React.ReactNode;
+}> = ({ onOpenFolder, children }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="max-w-3xl w-full mx-auto space-y-6">
+      <div className="space-y-2">
+        <div className="px-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-xs font-medium text-mid-gray uppercase tracking-wide">
+              {t("settings.history.title")}
+            </h2>
+          </div>
+          <OpenRecordingsButton
+            onClick={onOpenFolder}
+            label={t("settings.history.openFolder")}
+          />
+        </div>
+        <div className="bg-background border border-mid-gray/20 rounded-lg overflow-visible">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const HistorySettings: React.FC = () => {
   const { t } = useTranslation();
   const osType = useOsType();
+  const { getSetting } = useSettings();
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadHistoryEntries = useCallback(async () => {
     try {
-      const result = await commands.getHistoryEntries();
-      if (result.status === "ok") {
-        setHistoryEntries(result.data);
-      }
+      setHistoryEntries(await unwrap(commands.getHistoryEntries()));
     } catch (error) {
       console.error("Failed to load history entries:", error);
     } finally {
@@ -63,59 +95,48 @@ export const HistorySettings: React.FC = () => {
     loadHistoryEntries();
 
     // Listen for history update events
-    const setupListener = async () => {
-      const unlisten = await listen("history-updated", () => {
-        console.log("History updated, reloading entries...");
-        loadHistoryEntries();
-      });
-
-      // Return cleanup function
-      return unlisten;
-    };
-
-    let unlistenPromise = setupListener();
+    const unlistenPromise = listen("history-updated", () => {
+      loadHistoryEntries();
+    });
 
     return () => {
-      unlistenPromise.then((unlisten) => {
-        if (unlisten) {
-          unlisten();
-        }
-      });
+      unlistenPromise.then((unlisten) => unlisten());
     };
   }, [loadHistoryEntries]);
 
   const toggleSaved = async (id: number) => {
     try {
-      await commands.toggleHistoryEntrySaved(id);
+      await unwrap(commands.toggleHistoryEntrySaved(id));
       // No need to reload here - the event listener will handle it
     } catch (error) {
       console.error("Failed to toggle saved status:", error);
+      toast.error(t("settings.history.actionFailed"));
     }
   };
 
-  const copyToClipboard = async (text: string) => {
+  const copyToClipboard = async (text: string): Promise<boolean> => {
     try {
       await navigator.clipboard.writeText(text);
+      return true;
     } catch (error) {
       console.error("Failed to copy to clipboard:", error);
+      toast.error(t("settings.history.copyError"));
+      return false;
     }
   };
 
   const getAudioUrl = useCallback(
     async (fileName: string) => {
       try {
-        const result = await commands.getAudioFilePath(fileName);
-        if (result.status === "ok") {
-          if (osType === "linux") {
-            const fileData = await readFile(result.data);
-            const blob = new Blob([fileData], { type: "audio/wav" });
+        const path = await unwrap(commands.getAudioFilePath(fileName));
+        if (osType === "linux") {
+          const fileData = await readFile(path);
+          const blob = new Blob([fileData], { type: "audio/wav" });
 
-            return URL.createObjectURL(blob);
-          }
-
-          return convertFileSrc(result.data, "asset");
+          return URL.createObjectURL(blob);
         }
-        return null;
+
+        return convertFileSrc(path, "asset");
       } catch (error) {
         console.error("Failed to get audio file path:", error);
         return null;
@@ -125,113 +146,72 @@ export const HistorySettings: React.FC = () => {
   );
 
   const deleteAudioEntry = async (id: number) => {
-    try {
-      await commands.deleteHistoryEntry(id);
-    } catch (error) {
-      console.error("Failed to delete audio entry:", error);
-      throw error;
-    }
+    await unwrap(commands.deleteHistoryEntry(id));
   };
 
   const openRecordingsFolder = async () => {
     try {
-      await commands.openRecordingsFolder();
+      await unwrap(commands.openRecordingsFolder());
     } catch (error) {
       console.error("Failed to open recordings folder:", error);
+      toast.error(t("settings.history.actionFailed"));
     }
   };
 
   if (loading) {
     return (
-      <div className="max-w-3xl w-full mx-auto space-y-6">
-        <div className="space-y-2">
-          <div className="px-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-xs font-medium text-mid-gray uppercase tracking-wide">
-                {t("settings.history.title")}
-              </h2>
-            </div>
-            <OpenRecordingsButton
-              onClick={openRecordingsFolder}
-              label={t("settings.history.openFolder")}
-            />
-          </div>
-          <div className="bg-background border border-mid-gray/20 rounded-lg overflow-visible">
-            <div className="px-4 py-3 text-center text-text/60">
-              {t("settings.history.loading")}
-            </div>
-          </div>
+      <HistoryLayout onOpenFolder={openRecordingsFolder}>
+        <div className="px-4 py-3 text-center text-text/60">
+          {t("settings.history.loading")}
         </div>
-      </div>
+      </HistoryLayout>
     );
   }
 
   if (historyEntries.length === 0) {
+    const shortcut = getSetting("bindings")?.transcribe?.current_binding;
     return (
-      <div className="max-w-3xl w-full mx-auto space-y-6">
-        <div className="space-y-2">
-          <div className="px-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-xs font-medium text-mid-gray uppercase tracking-wide">
-                {t("settings.history.title")}
-              </h2>
-            </div>
-            <OpenRecordingsButton
-              onClick={openRecordingsFolder}
-              label={t("settings.history.openFolder")}
-            />
-          </div>
-          <div className="bg-background border border-mid-gray/20 rounded-lg overflow-visible">
-            <div className="px-4 py-3 text-center text-text/60">
-              {t("settings.history.empty")}
-            </div>
-          </div>
+      <HistoryLayout onOpenFolder={openRecordingsFolder}>
+        <div className="px-4 py-3 text-center text-text/60 space-y-1">
+          <p>{t("settings.history.empty")}</p>
+          {shortcut && (
+            <p className="text-xs text-text/50">
+              {t("settings.history.emptyHint", {
+                shortcut: formatKeyCombination(shortcut, osType),
+              })}
+            </p>
+          )}
         </div>
-      </div>
+      </HistoryLayout>
     );
   }
 
   return (
-    <div className="max-w-3xl w-full mx-auto space-y-6">
-      <div className="space-y-2">
-        <div className="px-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-xs font-medium text-mid-gray uppercase tracking-wide">
-              {t("settings.history.title")}
-            </h2>
-          </div>
-          <OpenRecordingsButton
-            onClick={openRecordingsFolder}
-            label={t("settings.history.openFolder")}
+    <HistoryLayout onOpenFolder={openRecordingsFolder}>
+      <div className="divide-y divide-mid-gray/20">
+        {historyEntries.map((entry) => (
+          <HistoryEntryComponent
+            key={entry.id}
+            entry={entry}
+            onToggleSaved={() => toggleSaved(entry.id)}
+            onCopyText={() =>
+              copyToClipboard(
+                entry.post_processed_text ?? entry.transcription_text,
+              )
+            }
+            getAudioUrl={getAudioUrl}
+            deleteAudio={deleteAudioEntry}
           />
-        </div>
-        <div className="bg-background border border-mid-gray/20 rounded-lg overflow-visible">
-          <div className="divide-y divide-mid-gray/20">
-            {historyEntries.map((entry) => (
-              <HistoryEntryComponent
-                key={entry.id}
-                entry={entry}
-                onToggleSaved={() => toggleSaved(entry.id)}
-                onCopyText={() =>
-                  copyToClipboard(
-                    entry.post_processed_text ?? entry.transcription_text,
-                  )
-                }
-                getAudioUrl={getAudioUrl}
-                deleteAudio={deleteAudioEntry}
-              />
-            ))}
-          </div>
-        </div>
+        ))}
       </div>
-    </div>
+    </HistoryLayout>
   );
 };
 
 interface HistoryEntryProps {
   entry: HistoryEntry;
   onToggleSaved: () => void;
-  onCopyText: () => void;
+  onCopyText: () => Promise<boolean>;
   getAudioUrl: (fileName: string) => Promise<string | null>;
   deleteAudio: (id: number) => Promise<void>;
 }
@@ -251,24 +231,32 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   const models = useModelStore((s) => s.models);
 
   const downloadedModels = models.filter((m) => m.is_downloaded);
+  const hasText = entry.transcription_text.trim().length > 0;
 
   const handleLoadAudio = useCallback(
     () => getAudioUrl(entry.file_name),
     [getAudioUrl, entry.file_name],
   );
 
-  const handleCopyText = () => {
-    onCopyText();
-    setShowCopied(true);
-    setTimeout(() => setShowCopied(false), 2000);
+  const handleCopyText = async () => {
+    if (await onCopyText()) {
+      setShowCopied(true);
+      setTimeout(() => setShowCopied(false), 2000);
+    }
   };
 
   const handleDeleteEntry = async () => {
+    // Suppression définitive (texte + audio) : on demande confirmation.
+    const confirmed = await ask(t("settings.history.deleteConfirm"), {
+      title: t("settings.history.delete"),
+      kind: "warning",
+    });
+    if (!confirmed) return;
     try {
       await deleteAudio(entry.id);
     } catch (error) {
       console.error("Failed to delete entry:", error);
-      alert("Failed to delete entry. Please try again.");
+      toast.error(t("settings.history.deleteError"));
     }
   };
 
@@ -276,9 +264,10 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
     setShowModelPicker(false);
     setReprocessing(true);
     try {
-      await commands.reprocessHistoryEntry(entry.id, modelId);
+      await unwrap(commands.reprocessHistoryEntry(entry.id, modelId));
     } catch (error) {
       console.error("Failed to reprocess entry:", error);
+      toast.error(t("settings.history.reprocessError"));
     } finally {
       setReprocessing(false);
     }
@@ -296,6 +285,12 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   }, [showModelPicker]);
 
   const formattedDate = formatDateTime(String(entry.timestamp), i18n.language);
+  const reprocessLabel = reprocessing
+    ? t("settings.history.reprocessing")
+    : t("settings.history.reprocess");
+  const saveLabel = entry.saved
+    ? t("settings.history.unsave")
+    : t("settings.history.save");
 
   return (
     <div className="px-4 py-2 pb-5 flex flex-col gap-3">
@@ -311,16 +306,16 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
         <div className="flex items-center gap-1">
           <div className="relative" ref={pickerRef}>
             <button
+              type="button"
               onClick={() =>
                 !reprocessing && setShowModelPicker(!showModelPicker)
               }
               disabled={reprocessing}
               className="p-2 rounded-md text-text/50 hover:text-logo-primary transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              title={
-                reprocessing
-                  ? t("settings.history.reprocessing")
-                  : t("settings.history.reprocess")
-              }
+              title={reprocessLabel}
+              aria-label={reprocessLabel}
+              aria-haspopup="menu"
+              aria-expanded={showModelPicker}
             >
               {reprocessing ? (
                 <Loader2 width={16} height={16} className="animate-spin" />
@@ -329,26 +324,34 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
               )}
             </button>
             {showModelPicker && downloadedModels.length > 0 && (
-              <div className="absolute right-0 top-full mt-1 z-50 bg-background border border-mid-gray/20 rounded-lg shadow-lg py-1 min-w-[200px]">
+              <div
+                className="absolute right-0 top-full mt-1 z-50 bg-background border border-mid-gray/20 rounded-lg shadow-lg py-1 min-w-[200px]"
+                role="menu"
+              >
                 <p className="px-3 py-1 text-xs text-text/50 font-medium">
                   {t("settings.history.selectModel")}
                 </p>
                 {downloadedModels.map((model) => (
                   <button
+                    type="button"
+                    role="menuitem"
                     key={model.id}
                     onClick={() => handleReprocess(model.id)}
                     className="w-full text-left px-3 py-1.5 text-sm hover:bg-mid-gray/10 transition-colors cursor-pointer"
                   >
-                    {model.name}
+                    {getTranslatedModelName(model, t)}
                   </button>
                 ))}
               </div>
             )}
           </div>
           <button
+            type="button"
             onClick={handleCopyText}
-            className="text-text/50 hover:text-logo-primary  hover:border-logo-primary transition-colors cursor-pointer"
+            disabled={!hasText && !entry.post_processed_text}
+            className="text-text/50 hover:text-logo-primary  hover:border-logo-primary transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             title={t("settings.history.copyToClipboard")}
+            aria-label={t("settings.history.copyToClipboard")}
           >
             {showCopied ? (
               <Check width={16} height={16} />
@@ -357,17 +360,16 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
             )}
           </button>
           <button
+            type="button"
             onClick={onToggleSaved}
             className={`p-2 rounded-md transition-colors cursor-pointer ${
               entry.saved
                 ? "text-logo-primary hover:text-logo-primary/80"
                 : "text-text/50 hover:text-logo-primary"
             }`}
-            title={
-              entry.saved
-                ? t("settings.history.unsave")
-                : t("settings.history.save")
-            }
+            title={saveLabel}
+            aria-label={saveLabel}
+            aria-pressed={entry.saved}
           >
             <Star
               width={16}
@@ -376,9 +378,11 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
             />
           </button>
           <button
+            type="button"
             onClick={handleDeleteEntry}
             className="text-text/50 hover:text-logo-primary transition-colors cursor-pointer"
             title={t("settings.history.delete")}
+            aria-label={t("settings.history.delete")}
           >
             <Trash2 width={16} height={16} />
           </button>
@@ -412,9 +416,15 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
             </p>
           </div>
         </div>
-      ) : (
+      ) : hasText ? (
         <p className="italic text-text/90 text-sm pb-2 select-text cursor-text">
           {entry.transcription_text}
+        </p>
+      ) : (
+        // Dictée dont la transcription a échoué : l'audio est gardé pour
+        // pouvoir la relancer avec le bouton « Retraiter ».
+        <p className="text-sm pb-2 text-text/50">
+          {t("settings.history.noText")}
         </p>
       )}
       <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />

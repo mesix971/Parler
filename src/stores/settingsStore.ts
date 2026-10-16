@@ -1,7 +1,15 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { AppSettings as Settings, AudioDevice } from "@/bindings";
+import type {
+  AppSettings as Settings,
+  AudioDevice,
+  LogLevel,
+  ModelUnloadTimeout,
+} from "@/bindings";
 import { commands } from "@/bindings";
+import { toast } from "sonner";
+import i18n from "@/i18n";
+import { unwrap, unwrapIfResult } from "@/lib/utils/result";
 
 interface SettingsStore {
   settings: Settings | null;
@@ -129,7 +137,7 @@ const settingUpdaters: {
     commands.changeMuteWhileRecordingSetting(value as boolean),
   append_trailing_space: (value) =>
     commands.changeAppendTrailingSpaceSetting(value as boolean),
-  log_level: (value) => commands.setLogLevel(value as any),
+  log_level: (value) => commands.setLogLevel(value as LogLevel),
   app_language: (value) => commands.changeAppLanguageSetting(value as string),
   experimental_enabled: (value) =>
     commands.changeExperimentalEnabledSetting(value as boolean),
@@ -142,6 +150,8 @@ const settingUpdaters: {
   gemini_api_key: (value) =>
     commands.changeGeminiApiKeySetting((value as string | null) ?? ""),
   gemini_model: (value) => commands.changeGeminiModelSetting(value as string),
+  model_unload_timeout: (value) =>
+    commands.setModelUnloadTimeout(value as ModelUnloadTimeout),
 };
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -274,15 +284,23 @@ export const useSettingsStore = create<SettingsStore>()(
 
         const updater = settingUpdaters[key];
         if (updater) {
-          await updater(value);
+          // Les commandes renvoient { status: "error" } au lieu de lever une
+          // exception : sans ce contrôle, un refus du backend passait inaperçu
+          // et l'interface affichait une valeur non enregistrée.
+          unwrapIfResult(await updater(value));
         } else if (key !== "bindings" && key !== "selected_model") {
           console.warn(`No handler for setting: ${String(key)}`);
         }
       } catch (error) {
         console.error(`Failed to update setting ${String(key)}:`, error);
-        if (settings) {
-          set({ settings: { ...settings, [key]: originalValue } });
-        }
+        // Retour arrière sur ce seul réglage, sans écraser les autres
+        // réglages modifiés entre-temps.
+        set((state) => ({
+          settings: state.settings
+            ? { ...state.settings, [key]: originalValue }
+            : null,
+        }));
+        toast.error(i18n.t("errors.settingUpdateFailed"));
       } finally {
         setUpdating(updateKey, false);
       }
@@ -371,7 +389,7 @@ export const useSettingsStore = create<SettingsStore>()(
       setUpdating(updateKey, true);
 
       try {
-        await commands.resetBinding(id);
+        await unwrap(commands.resetBinding(id));
         await refreshSettings();
       } catch (error) {
         console.error(`Failed to reset binding ${id}:`, error);
@@ -405,7 +423,7 @@ export const useSettingsStore = create<SettingsStore>()(
       setPostProcessModelOptions(providerId, []);
 
       try {
-        await commands.setPostProcessProvider(providerId);
+        await unwrap(commands.setPostProcessProvider(providerId));
         await refreshSettings();
       } catch (error) {
         console.error("Failed to set post-process provider:", error);
@@ -434,11 +452,17 @@ export const useSettingsStore = create<SettingsStore>()(
 
       try {
         if (settingType === "base_url") {
-          await commands.changePostProcessBaseUrlSetting(providerId, value);
+          await unwrap(
+            commands.changePostProcessBaseUrlSetting(providerId, value),
+          );
         } else if (settingType === "api_key") {
-          await commands.changePostProcessApiKeySetting(providerId, value);
+          await unwrap(
+            commands.changePostProcessApiKeySetting(providerId, value),
+          );
         } else if (settingType === "model") {
-          await commands.changePostProcessModelSetting(providerId, value);
+          await unwrap(
+            commands.changePostProcessModelSetting(providerId, value),
+          );
         }
         await refreshSettings();
       } catch (error) {
@@ -446,6 +470,8 @@ export const useSettingsStore = create<SettingsStore>()(
           `Failed to update post-process ${settingType.replace("_", " ")}:`,
           error,
         );
+        toast.error(i18n.t("errors.settingUpdateFailed"));
+        await refreshSettings();
       } finally {
         setUpdating(updateKey, false);
       }

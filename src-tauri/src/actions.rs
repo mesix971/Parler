@@ -1,7 +1,7 @@
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
-use crate::managers::audio::AudioRecordingManager;
+use crate::managers::audio::{AudioRecordingManager, StartRecordingError};
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{get_settings, AppSettings, APPLE_INTELLIGENCE_PROVIDER_ID};
@@ -16,7 +16,7 @@ use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri::Manager;
 
@@ -33,6 +33,15 @@ impl Drop for FinishGuard {
     }
 }
 
+/// Moment où l'enregistrement en cours a démarré : permet de distinguer un
+/// appui accidentel d'une vraie dictée restée sans résultat.
+static RECORDING_STARTED_AT: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+
+/// Durée d'appui au-delà de laquelle une dictée sans texte est signalée, et
+/// au-delà de laquelle l'audio d'une transcription en échec est conservé dans
+/// l'historique (en dessous, c'est un appui accidentel).
+const MIN_MEANINGFUL_RECORDING: Duration = Duration::from_millis(1500);
+
 // Shortcut Action Trait
 pub trait ShortcutAction: Send + Sync {
     fn start(&self, app: &AppHandle, binding_id: &str, shortcut_str: &str);
@@ -47,6 +56,16 @@ struct TranscribeAction {
 /// Field name for structured output JSON schema
 const TRANSCRIPTION_FIELD: &str = "transcription";
 
+/// Résultat d'un post-traitement par IA.
+enum ProcessOutcome {
+    /// Texte retouché.
+    Done(String),
+    /// Rien à faire (fonction non configurée) : le texte brut est utilisé.
+    Skipped,
+    /// L'appel a échoué : le texte brut est utilisé et l'utilisateur est prévenu.
+    Failed,
+}
+
 /// Strip invisible Unicode characters that some LLMs may insert
 fn strip_invisible_chars(s: &str) -> String {
     s.replace(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'], "")
@@ -58,12 +77,87 @@ fn build_system_prompt(prompt_template: &str) -> String {
     prompt_template.replace("${output}", "").trim().to_string()
 }
 
-async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
+/// La dictée qui se termine est-elle toujours la plus récente ? `ticket` est
+/// la génération de l'overlay relevée lors de son dernier affichage. Si elle a
+/// changé, une nouvelle dictée a commencé entre-temps : l'ancienne ne doit plus
+/// toucher ni à l'overlay ni à l'icône (sinon elle masquerait la nouvelle).
+fn is_current_dictation(ticket: u64) -> bool {
+    utils::current_overlay_generation() == ticket
+}
+
+/// Termine une dictée en erreur : message traduit dans l'overlay, icône au repos.
+fn finish_with_error(app: &AppHandle, code: &str, ticket: u64) {
+    if !is_current_dictation(ticket) {
+        warn!(
+            "Dictation error '{}' not shown: a newer dictation is in progress",
+            code
+        );
+        return;
+    }
+    change_tray_icon(app, TrayIconState::Idle);
+    utils::show_error_overlay(app, code);
+}
+
+/// Termine une dictée sans rien afficher (appui accidentel, annulation…).
+fn finish_quietly(app: &AppHandle, ticket: u64) {
+    if !is_current_dictation(ticket) {
+        debug!("Overlay left as is: a newer dictation is in progress");
+        return;
+    }
+    utils::hide_recording_overlay(app);
+    change_tray_icon(app, TrayIconState::Idle);
+}
+
+/// Code d'erreur (traduit par l'interface) correspondant à un échec de transcription.
+fn transcription_error_code(err: &anyhow::Error) -> &'static str {
+    if let Some(gemini) = err.downcast_ref::<crate::gemini_client::GeminiError>() {
+        return gemini.kind.code();
+    }
+    let message = err.to_string();
+    if message.contains("not loaded")
+        || message.contains("failed to load")
+        || message.contains("Model not")
+    {
+        "model_not_loaded"
+    } else {
+        "transcription_failed"
+    }
+}
+
+/// Enregistre une dictée dans l'historique, en tâche de fond.
+#[allow(clippy::too_many_arguments)]
+fn save_to_history(
+    hm: Arc<HistoryManager>,
+    samples: Vec<f32>,
+    transcription: String,
+    post_processed_text: Option<String>,
+    post_process_prompt: Option<String>,
+    action_key: Option<u8>,
+    model_name: Option<String>,
+) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = hm
+            .save_transcription(
+                samples,
+                transcription,
+                post_processed_text,
+                post_process_prompt,
+                action_key,
+                model_name,
+            )
+            .await
+        {
+            error!("Failed to save transcription to history: {}", e);
+        }
+    });
+}
+
+async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> ProcessOutcome {
     let provider = match settings.active_post_process_provider().cloned() {
         Some(provider) => provider,
         None => {
             debug!("Post-processing enabled but no provider is selected");
-            return None;
+            return ProcessOutcome::Skipped;
         }
     };
 
@@ -78,14 +172,14 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
             "Post-processing skipped because provider '{}' has no model configured",
             provider.id
         );
-        return None;
+        return ProcessOutcome::Skipped;
     }
 
     let selected_prompt_id = match &settings.post_process_selected_prompt_id {
         Some(id) => id.clone(),
         None => {
             debug!("Post-processing skipped because no prompt is selected");
-            return None;
+            return ProcessOutcome::Skipped;
         }
     };
 
@@ -100,13 +194,13 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                 "Post-processing skipped because prompt '{}' was not found",
                 selected_prompt_id
             );
-            return None;
+            return ProcessOutcome::Skipped;
         }
     };
 
     if prompt.trim().is_empty() {
         debug!("Post-processing skipped because the selected prompt is empty");
-        return None;
+        return ProcessOutcome::Skipped;
     }
 
     debug!(
@@ -134,7 +228,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                     debug!(
                         "Apple Intelligence selected but not currently available on this device"
                     );
-                    return None;
+                    return ProcessOutcome::Skipped;
                 }
 
                 let token_limit = model.trim().parse::<i32>().unwrap_or(0);
@@ -146,19 +240,19 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                     Ok(result) => {
                         if result.trim().is_empty() {
                             debug!("Apple Intelligence returned an empty response");
-                            None
+                            ProcessOutcome::Failed
                         } else {
                             let result = strip_invisible_chars(&result);
                             debug!(
                                 "Apple Intelligence post-processing succeeded. Output length: {} chars",
                                 result.len()
                             );
-                            Some(result)
+                            ProcessOutcome::Done(result)
                         }
                     }
                     Err(err) => {
                         error!("Apple Intelligence post-processing failed: {}", err);
-                        None
+                        ProcessOutcome::Failed
                     }
                 };
             }
@@ -166,7 +260,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
                 debug!("Apple Intelligence provider selected on unsupported platform");
-                return None;
+                return ProcessOutcome::Skipped;
             }
         }
 
@@ -195,7 +289,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         {
             Ok(Some(content)) => {
                 // Parse the JSON response to extract the transcription field
-                match serde_json::from_str::<serde_json::Value>(&content) {
+                return match serde_json::from_str::<serde_json::Value>(&content) {
                     Ok(json) => {
                         if let Some(transcription_value) =
                             json.get(TRANSCRIPTION_FIELD).and_then(|t| t.as_str())
@@ -206,10 +300,10 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                                 provider.id,
                                 result.len()
                             );
-                            return Some(result);
+                            ProcessOutcome::Done(result)
                         } else {
                             error!("Structured output response missing 'transcription' field");
-                            return Some(strip_invisible_chars(&content));
+                            ProcessOutcome::Done(strip_invisible_chars(&content))
                         }
                     }
                     Err(e) => {
@@ -217,13 +311,13 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                             "Failed to parse structured output JSON: {}. Returning raw content.",
                             e
                         );
-                        return Some(strip_invisible_chars(&content));
+                        ProcessOutcome::Done(strip_invisible_chars(&content))
                     }
-                }
+                };
             }
             Ok(None) => {
                 error!("LLM API response has no content");
-                return None;
+                return ProcessOutcome::Failed;
             }
             Err(e) => {
                 warn!(
@@ -249,11 +343,11 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                 provider.id,
                 content.len()
             );
-            Some(content)
+            ProcessOutcome::Done(content)
         }
         Ok(None) => {
             error!("LLM API response has no content");
-            None
+            ProcessOutcome::Failed
         }
         Err(e) => {
             error!(
@@ -261,7 +355,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                 provider.id,
                 e
             );
-            None
+            ProcessOutcome::Failed
         }
     }
 }
@@ -272,25 +366,25 @@ async fn process_action(
     prompt: &str,
     action_model: Option<&str>,
     action_provider_id: Option<&str>,
-) -> Option<String> {
-    let provider = if let Some(pid) = action_provider_id.filter(|p| !p.is_empty()) {
-        match settings.post_process_provider(pid).cloned() {
-            Some(p) => p,
-            None => {
+) -> ProcessOutcome {
+    let provider = match action_provider_id
+        .filter(|p| !p.is_empty())
+        .and_then(|pid| {
+            let found = settings.post_process_provider(pid).cloned();
+            if found.is_none() {
                 debug!(
                     "Action provider '{}' not found, falling back to active provider",
                     pid
                 );
-                settings.active_post_process_provider().cloned()?
             }
-        }
-    } else {
-        match settings.active_post_process_provider().cloned() {
-            Some(p) => p,
-            None => {
-                debug!("Action processing skipped: no provider configured");
-                return None;
-            }
+            found
+        })
+        .or_else(|| settings.active_post_process_provider().cloned())
+    {
+        Some(p) => p,
+        None => {
+            debug!("Action processing skipped: no provider configured");
+            return ProcessOutcome::Skipped;
         }
     };
 
@@ -319,7 +413,7 @@ async fn process_action(
         {
             if !apple_intelligence::check_apple_intelligence_availability() {
                 debug!("Apple Intelligence selected but not available for action processing");
-                return None;
+                return ProcessOutcome::Skipped;
             }
             let token_limit = model.trim().parse::<i32>().unwrap_or(0);
             return match apple_intelligence::process_text_with_system_prompt(
@@ -333,15 +427,15 @@ async fn process_action(
                         "Apple Intelligence action processing succeeded. Output length: {} chars",
                         result.len()
                     );
-                    Some(result)
+                    ProcessOutcome::Done(result)
                 }
                 Ok(_) => {
                     debug!("Apple Intelligence action returned empty result");
-                    None
+                    ProcessOutcome::Failed
                 }
                 Err(err) => {
                     error!("Apple Intelligence action processing failed: {}", err);
-                    None
+                    ProcessOutcome::Failed
                 }
             };
         }
@@ -349,7 +443,7 @@ async fn process_action(
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
             debug!("Apple Intelligence provider selected on unsupported platform");
-            return None;
+            return ProcessOutcome::Skipped;
         }
     }
 
@@ -358,7 +452,7 @@ async fn process_action(
             "Action processing skipped: no model configured for provider '{}'",
             provider.id
         );
-        return None;
+        return ProcessOutcome::Skipped;
     }
 
     let api_key = settings
@@ -386,18 +480,18 @@ async fn process_action(
                 provider.id,
                 result.len()
             );
-            Some(result)
+            ProcessOutcome::Done(result)
         }
         Ok(_) => {
             debug!("Action processing returned empty result");
-            None
+            ProcessOutcome::Failed
         }
         Err(e) => {
             error!(
                 "Action processing failed for provider '{}': {}",
                 provider.id, e
             );
-            None
+            ProcessOutcome::Failed
         }
     }
 }
@@ -446,6 +540,87 @@ async fn maybe_convert_chinese_variant(
     }
 }
 
+/// Transcrit l'audio, en basculant au besoin sur le modèle « audio long » (et en
+/// le réessayant si le modèle courant ne renvoie rien sur un audio conséquent).
+/// Renvoie le résultat et indique si le modèle a été changé (à restaurer).
+fn transcribe_with_fallback(
+    tm: &TranscriptionManager,
+    samples: Vec<f32>,
+    settings: &AppSettings,
+    original_model: Option<&str>,
+) -> (anyhow::Result<String>, bool) {
+    let duration_seconds = samples.len() as f32 / 16000.0;
+    let mut switched_model = false;
+
+    if let Some(ref long_model_id) = settings.long_audio_model {
+        if duration_seconds > settings.long_audio_threshold_seconds
+            && original_model != Some(long_model_id.as_str())
+        {
+            debug!(
+                "Audio duration {:.1}s exceeds threshold {:.1}s, switching to long audio model: {}",
+                duration_seconds, settings.long_audio_threshold_seconds, long_model_id
+            );
+            if let Err(e) = tm.load_model(long_model_id) {
+                warn!(
+                    "Failed to load long audio model '{}': {}, using current model",
+                    long_model_id, e
+                );
+            } else {
+                switched_model = true;
+            }
+        }
+    }
+
+    let transcription_time = Instant::now();
+    // Copie gardée uniquement si un nouvel essai est possible
+    let retry_samples =
+        (!switched_model && settings.long_audio_model.is_some()).then(|| samples.clone());
+    let result = tm.transcribe(samples);
+
+    let transcription = match result {
+        Ok(text) => text,
+        Err(e) => return (Err(e), switched_model),
+    };
+    // Le texte dicté n'est jamais écrit dans le journal (donnée personnelle).
+    debug!(
+        "Transcription completed in {:?} ({} chars)",
+        transcription_time.elapsed(),
+        transcription.len()
+    );
+
+    // Fallback: if cheap model returned nothing on meaningful audio, retry with accurate model
+    if transcription.is_empty() && duration_seconds > 1.0 {
+        if let (Some(long_model_id), Some(retry_samples)) =
+            (settings.long_audio_model.as_ref(), retry_samples)
+        {
+            if original_model != Some(long_model_id.as_str()) {
+                info!(
+                    "Transcription empty for {:.1}s audio, retrying with long audio model: {}",
+                    duration_seconds, long_model_id
+                );
+                match tm.load_model(long_model_id) {
+                    Ok(()) => {
+                        switched_model = true;
+                        match tm.transcribe(retry_samples) {
+                            Ok(retry_result) => {
+                                debug!(
+                                    "Fallback transcription returned {} chars",
+                                    retry_result.len()
+                                );
+                                return (Ok(retry_result), switched_model);
+                            }
+                            Err(e) => warn!("Fallback transcription error: {}", e),
+                        }
+                    }
+                    Err(e) => warn!("Failed to load long audio model for fallback: {}", e),
+                }
+            }
+        }
+    }
+
+    (Ok(transcription), switched_model)
+}
+
 impl ShortcutAction for TranscribeAction {
     fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
         let start_time = Instant::now();
@@ -466,49 +641,41 @@ impl ShortcutAction for TranscribeAction {
         let is_always_on = settings.always_on_microphone;
         debug!("Microphone mode - always_on: {}", is_always_on);
 
-        let mut recording_started = false;
-        if is_always_on {
-            // Always-on mode: Play audio feedback immediately, then apply mute after sound finishes
-            debug!("Always-on mode: Playing audio feedback immediately");
-            let rm_clone = Arc::clone(&rm);
-            let app_clone = app.clone();
-            // The blocking helper exits immediately if audio feedback is disabled,
-            // so we can always reuse this thread to ensure mute happens right after playback.
-            std::thread::spawn(move || {
-                play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                rm_clone.apply_mute();
-            });
+        let recording_start_time = Instant::now();
+        let start_result = rm.try_start_recording(&binding_id);
 
-            recording_started = rm.try_start_recording(&binding_id);
-            debug!("Recording started: {}", recording_started);
-        } else {
-            // On-demand mode: Start recording first, then play audio feedback, then apply mute
-            // This allows the microphone to be activated before playing the sound
-            debug!("On-demand mode: Starting recording first, then audio feedback");
-            let recording_start_time = Instant::now();
-            if rm.try_start_recording(&binding_id) {
-                recording_started = true;
+        match &start_result {
+            Ok(()) => {
                 debug!("Recording started in {:?}", recording_start_time.elapsed());
-                // Small delay to ensure microphone stream is active
+                if let Ok(mut started_at) = RECORDING_STARTED_AT.lock() {
+                    *started_at = Some(Instant::now());
+                }
                 let app_clone = app.clone();
                 let rm_clone = Arc::clone(&rm);
+                // The blocking helper exits immediately if audio feedback is disabled,
+                // so we can always reuse this thread to ensure mute happens right after playback.
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    debug!("Handling delayed audio feedback/mute sequence");
-                    // Helper handles disabled audio feedback by returning early, so we reuse it
-                    // to keep mute sequencing consistent in every mode.
+                    if !is_always_on {
+                        // Small delay to ensure microphone stream is active
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
                     play_feedback_sound_blocking(&app_clone, SoundType::Start);
                     rm_clone.apply_mute();
                 });
-            } else {
-                debug!("Failed to start recording");
-            }
-        }
 
-        if recording_started {
-            shortcut::register_cancel_shortcut(app);
-            shortcut::register_pause_shortcut(app);
-            shortcut::register_action_shortcuts(app);
+                shortcut::register_cancel_shortcut(app);
+                shortcut::register_pause_shortcut(app);
+                shortcut::register_action_shortcuts(app);
+            }
+            Err(StartRecordingError::Busy) => {
+                debug!("Recording not started: a recording is already in progress");
+            }
+            Err(StartRecordingError::Microphone(e)) => {
+                error!("Failed to start recording: {}", e);
+                // L'overlay et l'icône « enregistrement » ont été affichés avant
+                // de savoir si le micro démarrerait : on les remplace par l'erreur.
+                finish_with_error(app, "mic_unavailable", utils::current_overlay_generation());
+            }
         }
 
         debug!(
@@ -526,6 +693,13 @@ impl ShortcutAction for TranscribeAction {
         let stop_time = Instant::now();
         debug!("TranscribeAction::stop called for binding: {}", binding_id);
 
+        let recording_duration = RECORDING_STARTED_AT
+            .lock()
+            .ok()
+            .and_then(|mut started_at| started_at.take())
+            .map(|t| t.elapsed())
+            .unwrap_or_default();
+
         let ah = app.clone();
         let rm = Arc::clone(&app.state::<Arc<AudioRecordingManager>>());
         let tm = Arc::clone(&app.state::<Arc<TranscriptionManager>>());
@@ -533,6 +707,7 @@ impl ShortcutAction for TranscribeAction {
 
         change_tray_icon(app, TrayIconState::Transcribing);
         show_transcribing_overlay(app);
+        let mut overlay_ticket = utils::current_overlay_generation();
 
         // Unmute before playing audio feedback so the stop sound is audible
         rm.remove_mute();
@@ -556,237 +731,183 @@ impl ShortcutAction for TranscribeAction {
 
         tauri::async_runtime::spawn(async move {
             let _guard = FinishGuard(ah.clone());
-            let binding_id = binding_id.clone(); // Clone for the inner async task
             debug!(
                 "Starting async transcription task for binding: {}, action: {:?}",
                 binding_id, selected_action_key
             );
 
             let stop_recording_time = Instant::now();
-            if let Some(samples) = rm.stop_recording(&binding_id) {
-                debug!(
-                    "Recording stopped and samples retrieved in {:?}, sample count: {}",
-                    stop_recording_time.elapsed(),
-                    samples.len()
-                );
+            let Some(samples) = rm.stop_recording(&binding_id) else {
+                debug!("No samples retrieved from recording stop");
+                finish_quietly(&ah, overlay_ticket);
+                return;
+            };
+            debug!(
+                "Recording stopped and samples retrieved in {:?}, sample count: {}",
+                stop_recording_time.elapsed(),
+                samples.len()
+            );
 
-                let duration_seconds = samples.len() as f32 / 16000.0;
-                let settings_for_model = get_settings(&ah);
-                let original_model = tm.get_current_model();
-                let mut switched_model = false;
+            let settings = get_settings(&ah);
+            let original_model = tm.get_current_model();
+            let history_samples = samples.clone();
 
-                if let Some(ref long_model_id) = settings_for_model.long_audio_model {
-                    if duration_seconds > settings_for_model.long_audio_threshold_seconds
-                        && original_model.as_deref() != Some(long_model_id.as_str())
+            let (result, switched_model) =
+                transcribe_with_fallback(&tm, samples, &settings, original_model.as_deref());
+
+            match result {
+                Ok(transcription) if transcription.is_empty() => {
+                    // Rien d'exploitable : appui accidentel, ou vraie dictée sans
+                    // parole détectée (micro coupé, mauvais micro…) à signaler.
+                    // Rien n'est ajouté à l'historique : des appuis accidentels
+                    // y remplaceraient les vraies dictées (limite de 5 entrées).
+                    if recording_duration >= MIN_MEANINGFUL_RECORDING {
+                        finish_with_error(&ah, "no_speech", overlay_ticket);
+                    } else {
+                        finish_quietly(&ah, overlay_ticket);
+                    }
+                }
+                Ok(transcription) => {
+                    let mut final_text = transcription.clone();
+                    let mut post_processed_text: Option<String> = None;
+                    let mut post_process_prompt: Option<String> = None;
+
+                    // First, check if Chinese variant conversion is needed
+                    if let Some(converted_text) =
+                        maybe_convert_chinese_variant(&settings, &transcription).await
                     {
-                        debug!(
-                            "Audio duration {:.1}s exceeds threshold {:.1}s, switching to long audio model: {}",
-                            duration_seconds,
-                            settings_for_model.long_audio_threshold_seconds,
-                            long_model_id
-                        );
-                        if let Err(e) = tm.load_model(long_model_id) {
-                            warn!(
-                                "Failed to load long audio model '{}': {}, using current model",
-                                long_model_id, e
+                        final_text = converted_text;
+                    }
+
+                    let selected_action = selected_action_key.and_then(|key| {
+                        settings
+                            .post_process_actions
+                            .iter()
+                            .find(|a| a.key == key)
+                            .cloned()
+                    });
+
+                    let post_process_requested = selected_action.is_some() || post_process;
+                    if post_process_requested {
+                        show_processing_overlay(&ah);
+                        overlay_ticket = utils::current_overlay_generation();
+                    }
+
+                    // Action processing takes priority over default post-processing
+                    let outcome = if let Some(ref action) = selected_action {
+                        process_action(
+                            &settings,
+                            &final_text,
+                            &action.prompt,
+                            action.model.as_deref(),
+                            action.provider_id.as_deref(),
+                        )
+                        .await
+                    } else if post_process {
+                        post_process_transcription(&settings, &final_text).await
+                    } else {
+                        ProcessOutcome::Skipped
+                    };
+
+                    let post_process_failed = matches!(outcome, ProcessOutcome::Failed);
+                    // Retouche demandée (raccourci dédié ou action) mais rien de
+                    // configuré : texte brut collé, on le signale.
+                    let post_process_skipped =
+                        post_process_requested && matches!(outcome, ProcessOutcome::Skipped);
+                    if let ProcessOutcome::Done(processed_text) = outcome {
+                        post_processed_text = Some(processed_text.clone());
+                        final_text = processed_text;
+
+                        if let Some(ref action) = selected_action {
+                            post_process_prompt = Some(action.prompt.clone());
+                        } else if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
+                            post_process_prompt = settings
+                                .post_process_prompts
+                                .iter()
+                                .find(|p| &p.id == prompt_id)
+                                .map(|p| p.prompt.clone());
+                        }
+                    } else if final_text != transcription {
+                        // Chinese conversion was applied but no LLM post-processing
+                        post_processed_text = Some(final_text.clone());
+                    }
+
+                    // Paste the final text (either processed or original)
+                    let ah_clone = ah.clone();
+                    let paste_time = Instant::now();
+                    ah.run_on_main_thread(move || {
+                        let pasted = match utils::paste(final_text, ah_clone.clone()) {
+                            Ok(()) => {
+                                debug!("Text pasted successfully in {:?}", paste_time.elapsed());
+                                true
+                            }
+                            Err(e) => {
+                                error!("Failed to paste transcription: {}", e);
+                                false
+                            }
+                        };
+                        if !pasted {
+                            finish_with_error(&ah_clone, "paste_failed", overlay_ticket);
+                        } else if post_process_failed {
+                            // Texte brut collé : on prévient que la retouche IA a échoué.
+                            finish_with_error(&ah_clone, "post_process_failed", overlay_ticket);
+                        } else if post_process_skipped {
+                            finish_with_error(
+                                &ah_clone,
+                                "post_process_not_configured",
+                                overlay_ticket,
                             );
                         } else {
-                            switched_model = true;
+                            finish_quietly(&ah_clone, overlay_ticket);
                         }
-                    }
-                }
+                    })
+                    .unwrap_or_else(|e| {
+                        error!("Failed to run paste on main thread: {:?}", e);
+                        finish_with_error(&ah, "paste_failed", overlay_ticket);
+                    });
 
-                let transcription_time = Instant::now();
-                let samples_clone = samples.clone(); // Clone for history saving
-                match tm.transcribe(samples) {
-                    Ok(transcription) => {
-                        let mut transcription = transcription;
-                        debug!(
-                            "Transcription completed in {:?}: '{}'",
-                            transcription_time.elapsed(),
-                            transcription
+                    let action_key_for_history = if post_processed_text.is_some() {
+                        selected_action_key
+                    } else {
+                        None
+                    };
+                    save_to_history(
+                        Arc::clone(&hm),
+                        history_samples,
+                        transcription,
+                        post_processed_text,
+                        post_process_prompt,
+                        action_key_for_history,
+                        tm.get_current_model_name(),
+                    );
+                }
+                Err(err) => {
+                    error!("Transcription failed: {:#}", err);
+                    finish_with_error(&ah, transcription_error_code(&err), overlay_ticket);
+                    // L'audio d'une vraie dictée est gardé dans l'historique pour
+                    // pouvoir relancer la transcription une fois le problème réglé.
+                    if recording_duration >= MIN_MEANINGFUL_RECORDING {
+                        save_to_history(
+                            Arc::clone(&hm),
+                            history_samples,
+                            String::new(),
+                            None,
+                            None,
+                            None,
+                            tm.get_current_model_name(),
                         );
-
-                        // Fallback: if cheap model returned nothing on meaningful audio, retry with accurate model
-                        if transcription.is_empty()
-                            && duration_seconds > 1.0
-                            && !switched_model
-                        {
-                            if let Some(ref long_model_id) = settings_for_model.long_audio_model {
-                                let already_using_long = original_model.as_deref()
-                                    == Some(long_model_id.as_str());
-                                if !already_using_long {
-                                    info!(
-                                        "Transcription empty for {:.1}s audio, retrying with long audio model: {}",
-                                        duration_seconds, long_model_id
-                                    );
-                                    match tm.load_model(long_model_id) {
-                                        Ok(()) => {
-                                            switched_model = true;
-                                            match tm.transcribe(samples_clone.clone()) {
-                                                Ok(retry_result) => {
-                                                    if !retry_result.is_empty() {
-                                                        debug!(
-                                                            "Fallback transcription succeeded: '{}'",
-                                                            retry_result
-                                                        );
-                                                        transcription = retry_result;
-                                                    } else {
-                                                        debug!("Fallback transcription also returned empty");
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    warn!("Fallback transcription error: {}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "Failed to load long audio model for fallback: {}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let mut post_processed_text: Option<String> = None;
-                        let mut post_process_prompt: Option<String> = None;
-
-                        if !transcription.is_empty() {
-                            let settings = get_settings(&ah);
-                            let mut final_text = transcription.clone();
-
-                            // First, check if Chinese variant conversion is needed
-                            if let Some(converted_text) =
-                                maybe_convert_chinese_variant(&settings, &transcription).await
-                            {
-                                final_text = converted_text;
-                            }
-
-                            let selected_action = selected_action_key.and_then(|key| {
-                                settings
-                                    .post_process_actions
-                                    .iter()
-                                    .find(|a| a.key == key)
-                                    .cloned()
-                            });
-
-                            if selected_action.is_some() || post_process {
-                                show_processing_overlay(&ah);
-                            }
-
-                            // Action processing takes priority over default post-processing
-                            let processed = if let Some(ref action) = selected_action {
-                                process_action(
-                                    &settings,
-                                    &final_text,
-                                    &action.prompt,
-                                    action.model.as_deref(),
-                                    action.provider_id.as_deref(),
-                                )
-                                .await
-                            } else if post_process {
-                                post_process_transcription(&settings, &final_text).await
-                            } else {
-                                None
-                            };
-
-                            if let Some(processed_text) = processed {
-                                post_processed_text = Some(processed_text.clone());
-                                final_text = processed_text;
-
-                                if let Some(action) = selected_action {
-                                    post_process_prompt = Some(action.prompt);
-                                } else if let Some(prompt_id) =
-                                    &settings.post_process_selected_prompt_id
-                                {
-                                    if let Some(prompt) = settings
-                                        .post_process_prompts
-                                        .iter()
-                                        .find(|p| &p.id == prompt_id)
-                                    {
-                                        post_process_prompt = Some(prompt.prompt.clone());
-                                    }
-                                }
-                            } else if final_text != transcription {
-                                // Chinese conversion was applied but no LLM post-processing
-                                post_processed_text = Some(final_text.clone());
-                            }
-
-                            // Paste the final text (either processed or original)
-                            let ah_clone = ah.clone();
-                            let paste_time = Instant::now();
-                            ah.run_on_main_thread(move || {
-                                match utils::paste(final_text, ah_clone.clone()) {
-                                    Ok(()) => debug!(
-                                        "Text pasted successfully in {:?}",
-                                        paste_time.elapsed()
-                                    ),
-                                    Err(e) => error!("Failed to paste transcription: {}", e),
-                                }
-                                // Hide the overlay after transcription is complete
-                                utils::hide_recording_overlay(&ah_clone);
-                                change_tray_icon(&ah_clone, TrayIconState::Idle);
-                            })
-                            .unwrap_or_else(|e| {
-                                error!("Failed to run paste on main thread: {:?}", e);
-                                utils::hide_recording_overlay(&ah);
-                                change_tray_icon(&ah, TrayIconState::Idle);
-                            });
-                        } else {
-                            utils::hide_recording_overlay(&ah);
-                            change_tray_icon(&ah, TrayIconState::Idle);
-                        }
-
-                        // Always save to history for non-empty results or meaningful audio duration
-                        if !transcription.is_empty() || duration_seconds > 1.0 {
-                            let hm_clone = Arc::clone(&hm);
-                            let transcription_for_history = transcription.clone();
-                            let model_name_for_history = tm.get_current_model_name();
-                            let action_key_for_history = if post_processed_text.is_some() {
-                                selected_action_key
-                            } else {
-                                None
-                            };
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(e) = hm_clone
-                                    .save_transcription(
-                                        samples_clone,
-                                        transcription_for_history,
-                                        post_processed_text,
-                                        post_process_prompt,
-                                        action_key_for_history,
-                                        model_name_for_history,
-                                    )
-                                    .await
-                                {
-                                    error!("Failed to save transcription to history: {}", e);
-                                }
-                            });
-                        }
-                    }
-                    Err(err) => {
-                        debug!("Global Shortcut Transcription error: {}", err);
-                        utils::hide_recording_overlay(&ah);
-                        change_tray_icon(&ah, TrayIconState::Idle);
                     }
                 }
+            }
 
-                // Restore original model if we switched for long audio
-                if switched_model {
-                    if let Some(ref orig_id) = original_model {
-                        debug!("Restoring original model: {}", orig_id);
-                        if let Err(e) = tm.load_model(orig_id) {
-                            warn!("Failed to restore original model '{}': {}", orig_id, e);
-                        }
+            // Restore original model if we switched for long audio
+            if switched_model {
+                if let Some(ref orig_id) = original_model {
+                    debug!("Restoring original model: {}", orig_id);
+                    if let Err(e) = tm.load_model(orig_id) {
+                        warn!("Failed to restore original model '{}': {}", orig_id, e);
                     }
                 }
-            } else {
-                debug!("No samples retrieved from recording stop");
-                utils::hide_recording_overlay(&ah);
-                change_tray_icon(&ah, TrayIconState::Idle);
             }
         });
 
@@ -856,3 +977,21 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
     );
     map
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gemini_client::GeminiError;
+
+    #[test]
+    fn error_codes_for_transcription_failures() {
+        let missing_key = anyhow::Error::new(GeminiError::missing_key());
+        assert_eq!(transcription_error_code(&missing_key), "gemini_invalid_key");
+
+        let not_loaded = anyhow::anyhow!("Model is not loaded for transcription.");
+        assert_eq!(transcription_error_code(&not_loaded), "model_not_loaded");
+
+        let other = anyhow::anyhow!("boom");
+        assert_eq!(transcription_error_code(&other), "transcription_failed");
+    }
+}

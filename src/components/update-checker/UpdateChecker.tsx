@@ -18,6 +18,7 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ className = "" }) => {
   const [isInstalling, setIsInstalling] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [showUpToDate, setShowUpToDate] = useState(false);
+  const [checkFailed, setCheckFailed] = useState(false);
 
   const { settings, isLoading } = useSettings();
   const settingsLoaded = !isLoading && settings !== null;
@@ -83,6 +84,16 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ className = "" }) => {
       }
     } catch (error) {
       console.error("Failed to check for updates:", error);
+      // Vérification demandée à la main : on le dit au lieu de ne rien afficher.
+      if (isManualCheckRef.current) {
+        setCheckFailed(true);
+        if (upToDateTimeoutRef.current) {
+          clearTimeout(upToDateTimeoutRef.current);
+        }
+        upToDateTimeoutRef.current = setTimeout(() => {
+          setCheckFailed(false);
+        }, 4000);
+      }
     } finally {
       setIsChecking(false);
       isManualCheckRef.current = false;
@@ -154,6 +165,7 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ className = "" }) => {
           : t("footer.preparing");
     }
     if (isChecking) return t("footer.checkingUpdates");
+    if (checkFailed) return t("footer.updateCheckFailed");
     if (showUpToDate) return t("footer.upToDate");
     if (updateAvailable) return t("footer.updateAvailableShort");
     return t("footer.checkForUpdates");
@@ -169,7 +181,8 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ className = "" }) => {
 
   const isUpdateDisabled = !updateChecksEnabled || isChecking || isInstalling;
   const isUpdateClickable =
-    !isUpdateDisabled && (updateAvailable || (!isChecking && !showUpToDate));
+    !isUpdateDisabled &&
+    (updateAvailable || (!isChecking && !showUpToDate && !checkFailed));
 
   return (
     <div className={`flex items-center gap-3 ${className}`}>

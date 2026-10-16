@@ -5,20 +5,23 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use serde::Serialize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use transcribe_rs::{
     onnx::{
-        moonshine::{MoonshineModel, MoonshineParams, MoonshineVariant, StreamingModel, MoonshineStreamingParams},
+        moonshine::{
+            MoonshineModel, MoonshineParams, MoonshineStreamingParams, MoonshineVariant,
+            StreamingModel,
+        },
         parakeet::{ParakeetModel, ParakeetParams, TimestampGranularity},
         sense_voice::{SenseVoiceModel, SenseVoiceParams},
         Quantization,
     },
     whisper_cpp::{WhisperEngine, WhisperInferenceParams},
-    SpeechModel, TranscriptionResult,
+    TranscriptionResult,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -38,6 +41,19 @@ enum LoadedEngine {
     GeminiApi,
 }
 
+/// Horodatage actuel en millisecondes (0 si l'horloge système est incohérente).
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// Pas d'implémentation de `Drop` ici : ce type est cloné (fil de chargement,
+// surveillance d'inactivité), et un `Drop` s'exécutait à la destruction de
+// CHAQUE clone — il arrêtait la surveillance d'inactivité dès le premier
+// chargement de modèle, et le déchargement automatique ne marchait plus.
+// La surveillance vit aussi longtemps que l'application.
 #[derive(Clone)]
 pub struct TranscriptionManager {
     engine: Arc<Mutex<Option<LoadedEngine>>>,
@@ -45,8 +61,6 @@ pub struct TranscriptionManager {
     app_handle: AppHandle,
     current_model_id: Arc<Mutex<Option<String>>>,
     last_activity: Arc<AtomicU64>,
-    shutdown_signal: Arc<AtomicBool>,
-    watcher_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     is_loading: Arc<Mutex<bool>>,
     loading_condvar: Arc<Condvar>,
 }
@@ -58,14 +72,7 @@ impl TranscriptionManager {
             model_manager,
             app_handle: app_handle.clone(),
             current_model_id: Arc::new(Mutex::new(None)),
-            last_activity: Arc::new(AtomicU64::new(
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-            )),
-            shutdown_signal: Arc::new(AtomicBool::new(false)),
-            watcher_handle: Arc::new(Mutex::new(None)),
+            last_activity: Arc::new(AtomicU64::new(now_millis())),
             is_loading: Arc::new(Mutex::new(false)),
             loading_condvar: Arc::new(Condvar::new()),
         };
@@ -74,15 +81,9 @@ impl TranscriptionManager {
         {
             let app_handle_cloned = app_handle.clone();
             let manager_cloned = manager.clone();
-            let shutdown_signal = manager.shutdown_signal.clone();
-            let handle = thread::spawn(move || {
-                while !shutdown_signal.load(Ordering::Relaxed) {
+            thread::spawn(move || {
+                loop {
                     thread::sleep(Duration::from_secs(10)); // Check every 10 seconds
-
-                    // Check shutdown signal again after sleep
-                    if shutdown_signal.load(Ordering::Relaxed) {
-                        break;
-                    }
 
                     let settings = get_settings(&app_handle_cloned);
                     let timeout_seconds = settings.model_unload_timeout.to_seconds();
@@ -94,12 +95,15 @@ impl TranscriptionManager {
                         }
 
                         let last = manager_cloned.last_activity.load(Ordering::Relaxed);
-                        let now_ms = SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64;
+                        let now_ms = now_millis();
 
-                        if now_ms.saturating_sub(last) > limit_seconds * 1000 {
+                        // Jamais de déchargement pendant une dictée en cours :
+                        // elle échouerait à la transcription (« aucun modèle »).
+                        let recording = app_handle_cloned
+                            .try_state::<Arc<crate::managers::audio::AudioRecordingManager>>()
+                            .is_some_and(|audio| audio.is_recording());
+
+                        if !recording && now_ms.saturating_sub(last) > limit_seconds * 1000 {
                             // idle -> unload
                             if manager_cloned.is_model_loaded() {
                                 let unload_start = std::time::Instant::now();
@@ -125,9 +129,7 @@ impl TranscriptionManager {
                         }
                     }
                 }
-                debug!("Idle watcher thread shutting down gracefully");
             });
-            *manager.watcher_handle.lock().unwrap() = Some(handle);
         }
 
         Ok(manager)
@@ -156,7 +158,10 @@ impl TranscriptionManager {
             *engine = None;
         }
         {
-            let mut current_model = self.current_model_id.lock().unwrap();
+            let mut current_model = self
+                .current_model_id
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             *current_model = None;
         }
 
@@ -251,8 +256,8 @@ impl TranscriptionManager {
                 LoadedEngine::Whisper(engine)
             }
             EngineType::Parakeet => {
-                let engine = ParakeetModel::load(&model_path, &Quantization::Int8)
-                    .map_err(|e| {
+                let engine =
+                    ParakeetModel::load(&model_path, &Quantization::Int8).map_err(|e| {
                         let error_msg =
                             format!("Failed to load parakeet model {}: {}", model_id, e);
                         let _ = self.app_handle.emit(
@@ -269,21 +274,24 @@ impl TranscriptionManager {
                 LoadedEngine::Parakeet(engine)
             }
             EngineType::Moonshine => {
-                let engine = MoonshineModel::load(&model_path, MoonshineVariant::Base, &Quantization::default())
-                    .map_err(|e| {
-                        let error_msg =
-                            format!("Failed to load moonshine model {}: {}", model_id, e);
-                        let _ = self.app_handle.emit(
-                            "model-state-changed",
-                            ModelStateEvent {
-                                event_type: "loading_failed".to_string(),
-                                model_id: Some(model_id.to_string()),
-                                model_name: Some(model_info.name.clone()),
-                                error: Some(error_msg.clone()),
-                            },
-                        );
-                        anyhow::anyhow!(error_msg)
-                    })?;
+                let engine = MoonshineModel::load(
+                    &model_path,
+                    MoonshineVariant::Base,
+                    &Quantization::default(),
+                )
+                .map_err(|e| {
+                    let error_msg = format!("Failed to load moonshine model {}: {}", model_id, e);
+                    let _ = self.app_handle.emit(
+                        "model-state-changed",
+                        ModelStateEvent {
+                            event_type: "loading_failed".to_string(),
+                            model_id: Some(model_id.to_string()),
+                            model_name: Some(model_info.name.clone()),
+                            error: Some(error_msg.clone()),
+                        },
+                    );
+                    anyhow::anyhow!(error_msg)
+                })?;
                 LoadedEngine::Moonshine(engine)
             }
             EngineType::MoonshineStreaming => {
@@ -307,8 +315,8 @@ impl TranscriptionManager {
                 LoadedEngine::MoonshineStreaming(engine)
             }
             EngineType::SenseVoice => {
-                let engine = SenseVoiceModel::load(&model_path, &Quantization::Int8)
-                    .map_err(|e| {
+                let engine =
+                    SenseVoiceModel::load(&model_path, &Quantization::Int8).map_err(|e| {
                         let error_msg =
                             format!("Failed to load SenseVoice model {}: {}", model_id, e);
                         let _ = self.app_handle.emit(
@@ -330,7 +338,7 @@ impl TranscriptionManager {
                     || settings
                         .gemini_api_key
                         .as_ref()
-                        .map_or(true, |k| k.is_empty())
+                        .is_none_or(|k| k.is_empty())
                 {
                     let error_msg = "Gemini API key not configured";
                     let _ = self.app_handle.emit(
@@ -354,7 +362,10 @@ impl TranscriptionManager {
             *engine = Some(loaded_engine);
         }
         {
-            let mut current_model = self.current_model_id.lock().unwrap();
+            let mut current_model = self
+                .current_model_id
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             *current_model = Some(model_id.to_string());
         }
 
@@ -380,7 +391,13 @@ impl TranscriptionManager {
 
     /// Kicks off the model loading in a background thread if it's not already loaded
     pub fn initiate_model_load(&self) {
-        let mut is_loading = self.is_loading.lock().unwrap();
+        // Appelé au début de chaque dictée : compte comme une activité, pour
+        // que le déchargement automatique ne frappe pas pendant l'enregistrement.
+        self.last_activity.store(now_millis(), Ordering::Relaxed);
+        let mut is_loading = self
+            .is_loading
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if *is_loading || self.is_model_loaded() {
             return;
         }
@@ -389,17 +406,29 @@ impl TranscriptionManager {
         let self_clone = self.clone();
         thread::spawn(move || {
             let settings = get_settings(&self_clone.app_handle);
-            if let Err(e) = self_clone.load_model(&settings.selected_model) {
-                error!("Failed to load model: {}", e);
+            // Une panique pendant le chargement ne doit pas laisser `is_loading`
+            // à vrai : la transcription attendrait alors indéfiniment.
+            match catch_unwind(AssertUnwindSafe(|| {
+                self_clone.load_model(&settings.selected_model)
+            })) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("Failed to load model: {}", e),
+                Err(_) => error!("Model loading panicked"),
             }
-            let mut is_loading = self_clone.is_loading.lock().unwrap();
+            let mut is_loading = self_clone
+                .is_loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             *is_loading = false;
             self_clone.loading_condvar.notify_all();
         });
     }
 
     pub fn get_current_model(&self) -> Option<String> {
-        let current_model = self.current_model_id.lock().unwrap();
+        let current_model = self
+            .current_model_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         current_model.clone()
     }
 
@@ -412,13 +441,7 @@ impl TranscriptionManager {
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
         // Update last activity timestamp
-        self.last_activity.store(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.last_activity.store(now_millis(), Ordering::Relaxed);
 
         let st = std::time::Instant::now();
 
@@ -433,13 +456,32 @@ impl TranscriptionManager {
         // Check if model is loaded, if not try to load it
         {
             // If the model is loading, wait for it to complete.
-            let mut is_loading = self.is_loading.lock().unwrap();
+            let mut is_loading = self
+                .is_loading
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             while *is_loading {
-                is_loading = self.loading_condvar.wait(is_loading).unwrap();
+                is_loading = self
+                    .loading_condvar
+                    .wait(is_loading)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
 
             let engine_guard = self.lock_engine();
             if engine_guard.is_none() {
+                // Cas fréquent : Gemini choisi mais clé absente, le « chargement »
+                // a échoué. On le dit clairement au lieu de « aucun modèle ».
+                let settings = get_settings(&self.app_handle);
+                let gemini_without_key = settings.selected_model == "gemini-api"
+                    && settings
+                        .gemini_api_key
+                        .as_deref()
+                        .is_none_or(|key| key.trim().is_empty());
+                if gemini_without_key {
+                    return Err(anyhow::Error::new(
+                        crate::gemini_client::GeminiError::missing_key(),
+                    ));
+                }
                 return Err(anyhow::anyhow!("Model is not loaded for transcription."));
             }
         }
@@ -454,19 +496,23 @@ impl TranscriptionManager {
                 drop(engine_guard);
                 let api_key = settings
                     .gemini_api_key
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Gemini API key not configured"))?
-                    .clone();
+                    .clone()
+                    .filter(|k| !k.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::Error::new(crate::gemini_client::GeminiError::missing_key())
+                    })?;
                 let gemini_model = settings.gemini_model.clone();
 
-                // Use block_in_place to safely run async code from a tokio worker thread.
-                // Handle::block_on() panics if called directly from an async context,
-                // so block_in_place tells tokio to move its work off this thread first.
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                        crate::gemini_client::transcribe_audio(&api_key, &gemini_model, &audio),
-                    )
-                })?;
+                let request =
+                    crate::gemini_client::transcribe_audio(&api_key, &gemini_model, &audio);
+                let result = match tokio::runtime::Handle::try_current() {
+                    // Use block_in_place to safely run async code from a tokio worker thread.
+                    // Handle::block_on() panics if called directly from an async context,
+                    // so block_in_place tells tokio to move its work off this thread first.
+                    Ok(handle) => tokio::task::block_in_place(|| handle.block_on(request))?,
+                    // Appel depuis un fil hors runtime : on passe par celui de Tauri.
+                    Err(_) => tauri::async_runtime::block_on(request)?,
+                };
 
                 let corrected = if !settings.custom_words.is_empty() {
                     apply_custom_words(
@@ -511,8 +557,8 @@ impl TranscriptionManager {
             // Release the lock before transcribing — no mutex held during the engine call
             drop(engine_guard);
 
-            let transcribe_result = catch_unwind(AssertUnwindSafe(
-                || -> Result<TranscriptionResult> {
+            let transcribe_result =
+                catch_unwind(AssertUnwindSafe(|| -> Result<TranscriptionResult> {
                     match &mut engine {
                         LoadedEngine::Whisper(whisper_engine) => {
                             let whisper_language = if settings.selected_language == "auto" {
@@ -580,8 +626,7 @@ impl TranscriptionManager {
                             unreachable!("GeminiApi handled before catch_unwind")
                         }
                     }
-                },
-            ));
+                }));
 
             match transcribe_result {
                 Ok(inner_result) => {
@@ -663,29 +708,15 @@ impl TranscriptionManager {
         if final_result.is_empty() {
             info!("Transcription result is empty");
         } else {
-            info!("Transcription result: {}", final_result);
+            // Le texte dicté n'est jamais écrit dans le journal (donnée personnelle).
+            info!(
+                "Transcription result: {} chars",
+                final_result.chars().count()
+            );
         }
 
         self.maybe_unload_immediately("transcription");
 
         Ok(final_result)
-    }
-}
-
-impl Drop for TranscriptionManager {
-    fn drop(&mut self) {
-        debug!("Shutting down TranscriptionManager");
-
-        // Signal the watcher thread to shutdown
-        self.shutdown_signal.store(true, Ordering::Relaxed);
-
-        // Wait for the thread to finish gracefully
-        if let Some(handle) = self.watcher_handle.lock().unwrap().take() {
-            if let Err(e) = handle.join() {
-                warn!("Failed to join idle watcher thread: {:?}", e);
-            } else {
-                debug!("Idle watcher thread joined successfully");
-            }
-        }
     }
 }

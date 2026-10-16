@@ -31,7 +31,7 @@ export const LogDirectory: React.FC<LogDirectoryProps> = ({
         const errorMessage =
           err && typeof err === "object" && "message" in err
             ? String(err.message)
-            : "Failed to load log directory";
+            : t("errors.loadDirectoryFailed");
         setError(errorMessage);
       } finally {
         setLoading(false);

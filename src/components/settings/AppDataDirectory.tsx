@@ -29,7 +29,7 @@ export const AppDataDirectory: React.FC<AppDataDirectoryProps> = ({
         }
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to load app directory",
+          err instanceof Error ? err.message : t("errors.loadDirectoryFailed"),
         );
       } finally {
         setLoading(false);

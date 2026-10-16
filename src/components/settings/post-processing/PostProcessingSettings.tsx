@@ -1,6 +1,8 @@
 import React, { useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { commands } from "@/bindings";
+import { unwrap } from "@/lib/utils/result";
 
 import {
   Dropdown,
@@ -107,51 +109,64 @@ const PostProcessingActionsComponent: React.FC = () => {
           providerId = saved.provider_id;
         }
       }
+      // unwrap : un refus du backend lève une erreur, le formulaire reste
+      // alors ouvert au lieu de se fermer comme si tout avait réussi.
       if (editingAction.isNew) {
-        await commands.addPostProcessAction(
-          editingAction.key,
-          editingAction.name.trim(),
-          editingAction.prompt.trim(),
-          model,
-          providerId,
+        await unwrap(
+          commands.addPostProcessAction(
+            editingAction.key,
+            editingAction.name.trim(),
+            editingAction.prompt.trim(),
+            model,
+            providerId,
+          ),
         );
       } else if (
         editingAction.originalKey !== undefined &&
         editingAction.originalKey !== editingAction.key
       ) {
-        await commands.deletePostProcessAction(editingAction.originalKey);
-        await commands.addPostProcessAction(
-          editingAction.key,
-          editingAction.name.trim(),
-          editingAction.prompt.trim(),
-          model,
-          providerId,
+        await unwrap(
+          commands.deletePostProcessAction(editingAction.originalKey),
+        );
+        await unwrap(
+          commands.addPostProcessAction(
+            editingAction.key,
+            editingAction.name.trim(),
+            editingAction.prompt.trim(),
+            model,
+            providerId,
+          ),
         );
       } else {
-        await commands.updatePostProcessAction(
-          editingAction.key,
-          editingAction.name.trim(),
-          editingAction.prompt.trim(),
-          model,
-          providerId,
+        await unwrap(
+          commands.updatePostProcessAction(
+            editingAction.key,
+            editingAction.name.trim(),
+            editingAction.prompt.trim(),
+            model,
+            providerId,
+          ),
         );
       }
       await refreshSettings();
       setEditingAction(null);
     } catch (error) {
       console.error("Failed to save action:", error);
+      toast.error(t("errors.settingUpdateFailed"));
+      await refreshSettings();
     }
   };
 
   const handleDelete = async (key: number) => {
     try {
-      await commands.deletePostProcessAction(key);
+      await unwrap(commands.deletePostProcessAction(key));
       await refreshSettings();
       if (editingAction?.key === key) {
         setEditingAction(null);
       }
     } catch (error) {
       console.error("Failed to delete action:", error);
+      toast.error(t("errors.settingUpdateFailed"));
     }
   };
 
@@ -265,12 +280,14 @@ const PostProcessingActionsComponent: React.FC = () => {
                   "settings.postProcessing.actions.promptPlaceholder",
                 )}
               />
-              <p
-                className="text-xs text-mid-gray/70"
-                dangerouslySetInnerHTML={{
-                  __html: t("settings.postProcessing.actions.promptTip"),
-                }}
-              />
+              {/* Trans plutôt que dangerouslySetInnerHTML : seule la balise
+                  <code> de la traduction est rendue, rien d'autre. */}
+              <p className="text-xs text-mid-gray/70">
+                <Trans
+                  i18nKey="settings.postProcessing.actions.promptTip"
+                  components={{ code: <code /> }}
+                />
+              </p>
             </div>
 
             <div className="space-y-1 flex flex-col">

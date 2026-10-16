@@ -35,7 +35,9 @@ pub async fn get_audio_file_path(
     history_manager: State<'_, Arc<HistoryManager>>,
     file_name: String,
 ) -> Result<String, String> {
-    let path = history_manager.get_audio_file_path(&file_name);
+    let path = history_manager
+        .get_audio_file_path(&file_name)
+        .map_err(|e| e.to_string())?;
     path.to_str()
         .ok_or_else(|| "Invalid file path".to_string())
         .map(|s| s.to_string())
@@ -75,7 +77,7 @@ pub async fn update_history_limit(
 #[tauri::command]
 #[specta::specta]
 pub async fn reprocess_history_entry(
-    _app: AppHandle,
+    app: AppHandle,
     history_manager: State<'_, Arc<HistoryManager>>,
     transcription_manager: State<'_, Arc<TranscriptionManager>>,
     id: i64,
@@ -87,7 +89,9 @@ pub async fn reprocess_history_entry(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "History entry not found".to_string())?;
 
-    let audio_path = history_manager.get_audio_file_path(&entry.file_name);
+    let audio_path = history_manager
+        .get_audio_file_path(&entry.file_name)
+        .map_err(|e| e.to_string())?;
     if !audio_path.exists() {
         return Err("Audio file not found".to_string());
     }
@@ -100,22 +104,41 @@ pub async fn reprocess_history_entry(
         .load_model(&model_id)
         .map_err(|e| e.to_string())?;
 
-    let new_text = transcription_manager
+    // Le modèle d'origine est restauré dans tous les cas, y compris quand la
+    // transcription échoue (avant, une erreur laissait le modèle de retraitement).
+    let result = transcription_manager
         .transcribe(samples)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+        .and_then(|new_text| {
+            let model_name = transcription_manager.get_current_model_name();
+            history_manager
+                .update_transcription_text(id, &new_text, model_name.as_deref())
+                .map_err(|e| e.to_string())
+                .map(|_| new_text)
+        });
 
-    let model_name = transcription_manager.get_current_model_name();
-    history_manager
-        .update_transcription_text(id, &new_text, model_name.as_deref())
-        .map_err(|e| e.to_string())?;
-
-    if let Some(prev_id) = previous_model {
-        if prev_id != model_id {
-            let _ = transcription_manager.load_model(&prev_id);
+    match previous_model {
+        Some(prev_id) if prev_id != model_id => {
+            if let Err(e) = transcription_manager.load_model(&prev_id) {
+                log::warn!(
+                    "Failed to restore model '{}' after reprocess: {}",
+                    prev_id,
+                    e
+                );
+            }
         }
+        // Aucun modèle n'était chargé : on ne laisse pas celui du retraitement
+        // en place, sinon la prochaine dictée l'utiliserait à la place du
+        // modèle choisi dans les réglages.
+        None if crate::settings::get_settings(&app).selected_model != model_id => {
+            if let Err(e) = transcription_manager.unload_model() {
+                log::warn!("Failed to unload reprocess model: {}", e);
+            }
+        }
+        _ => {}
     }
 
-    Ok(new_text)
+    result
 }
 
 #[tauri::command]

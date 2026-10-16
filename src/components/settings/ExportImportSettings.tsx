@@ -32,7 +32,9 @@ export const ExportImportSettings: React.FC<ExportImportSettingsProps> = ({
       }
     } catch (err) {
       setStatus(
-        err instanceof Error ? err.message : "Export failed",
+        err instanceof Error
+          ? err.message
+          : t("settings.about.exportImport.exportFailed"),
       );
     }
     setTimeout(() => setStatus(null), 3000);
@@ -54,7 +56,9 @@ export const ExportImportSettings: React.FC<ExportImportSettingsProps> = ({
       }
     } catch (err) {
       setStatus(
-        err instanceof Error ? err.message : "Import failed",
+        err instanceof Error
+          ? err.message
+          : t("settings.about.exportImport.importFailed"),
       );
     }
     setTimeout(() => setStatus(null), 3000);
@@ -74,9 +78,7 @@ export const ExportImportSettings: React.FC<ExportImportSettingsProps> = ({
         <Button variant="secondary" size="md" onClick={handleImport}>
           {t("settings.about.exportImport.import")}
         </Button>
-        {status && (
-          <span className="text-xs text-mid-gray">{status}</span>
-        )}
+        {status && <span className="text-xs text-mid-gray">{status}</span>}
       </div>
     </SettingContainer>
   );

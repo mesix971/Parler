@@ -1,33 +1,51 @@
+/* Conteneur : apparition/disparition en fondu. On n'utilise PAS display:none
+   pour l'état caché (il supprimerait les deux animations) : visibility passe à
+   « hidden » seulement à la fin du fondu de sortie. */
+.overlay-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(8px) scale(0.96);
+  transition:
+    opacity 260ms ease-out,
+    transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 300ms;
+}
+
+.overlay-wrapper.is-visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 260ms ease-out,
+    transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 0s;
+}
+
 .recording-overlay {
   height: 34px;
   width: 200px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 8px 0 12px;
   background: #1a1a1a;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 17px;
-  opacity: 0;
-  transform: translateY(8px) scale(0.96);
-  transition:
-    opacity 260ms ease-out,
-    transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    border-color 260ms ease-out;
+  transition: border-color 260ms ease-out;
   box-sizing: border-box;
-}
-
-.recording-overlay.is-visible {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-}
-
-.recording-overlay.is-hidden {
-  opacity: 0;
 }
 
 .recording-overlay.state-recording {
   border-color: rgba(255, 255, 255, 0.18);
+}
+
+.recording-overlay.state-error {
+  border-color: rgba(255, 110, 110, 0.65);
 }
 
 .overlay-left {
@@ -59,11 +77,11 @@
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  gap: 2px;
+  gap: 0;
 }
 
 .timer-text {
-  color: rgba(255, 255, 255, 0.8);
+  color: rgba(255, 255, 255, 0.85);
   font-size: 12px;
   font-weight: 500;
   font-family: -apple-system, BlinkMacSystemFont, "SF Mono", "Menlo", monospace;
@@ -90,13 +108,36 @@
     opacity 80ms ease-out;
 }
 
+/* Textes d'état : contraste ≥ 4,5:1 sur le fond, même au creux de la pulsation */
 .transcribing-text {
-  color: rgba(255, 255, 255, 0.7);
+  color: rgba(255, 255, 255, 0.92);
   font-size: 11px;
   font-weight: 500;
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   animation: transcribing-pulse 2s infinite ease-in-out;
+}
+
+.error-text,
+.action-name {
+  font-size: 11px;
+  font-weight: 600;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.error-text {
+  color: #ffc2c2;
+  animation: cancel-flash 300ms ease-out;
+}
+
+.action-name {
+  color: #ffffff;
+  animation: cancel-flash 200ms ease-out;
 }
 
 @keyframes record-pulse {
@@ -113,7 +154,7 @@
 @keyframes transcribing-pulse {
   0%,
   100% {
-    opacity: 0.5;
+    opacity: 0.7;
   }
   50% {
     opacity: 1;
@@ -127,7 +168,8 @@
   width: 18px;
   height: 18px;
   border-radius: 4px;
-  background: rgba(100, 140, 255, 0.85);
+  /* Bleu assez foncé pour un contraste ≥ 4,5:1 avec le chiffre blanc */
+  background: #3c5ac8;
   color: #fff;
   font-size: 11px;
   font-weight: 700;
@@ -148,7 +190,7 @@
 }
 
 .cancel-confirm-text {
-  color: rgba(255, 255, 255, 0.7);
+  color: rgba(255, 255, 255, 0.85);
   font-size: 10px;
   font-weight: 500;
   font-family:
@@ -170,9 +212,12 @@
   }
 }
 
-.cancel-button {
-  width: 20px;
-  height: 20px;
+/* Boutons pause / annuler : vrais boutons, cible de 24 px (WCAG 2.2) */
+.overlay-button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
   border-radius: 50%;
   background: transparent;
   display: flex;
@@ -183,23 +228,26 @@
   flex-shrink: 0;
 }
 
-.cancel-button:hover {
-  background: rgba(255, 255, 255, 0.1);
+.overlay-button:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
-.pause-button {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background-color 150ms ease-out;
-  flex-shrink: 0;
+.overlay-button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 1px;
 }
 
-.pause-button:hover {
-  background: rgba(255, 255, 255, 0.1);
+@media (prefers-reduced-motion: reduce) {
+  .overlay-wrapper,
+  .overlay-wrapper.is-visible {
+    transform: none;
+  }
+  .recording-overlay.state-recording .overlay-left::after,
+  .transcribing-text,
+  .error-text,
+  .action-name,
+  .action-badge,
+  .cancel-confirm-text {
+    animation: none;
+  }
 }

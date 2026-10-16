@@ -1,9 +1,9 @@
-use log::{debug, warn};
+use log::{debug, error, warn};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use specta::Type;
 use std::collections::HashMap;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 
 pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
@@ -132,9 +132,10 @@ pub enum OverlayPosition {
     Bottom,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelUnloadTimeout {
+    #[default]
     Never,
     Immediately,
     Min2,
@@ -156,16 +157,18 @@ pub enum PasteMethod {
     ExternalScript,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipboardHandling {
+    #[default]
     DontModify,
     CopyToClipboard,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoSubmitKey {
+    #[default]
     Enter,
     CtrlEnter,
     CmdEnter,
@@ -199,12 +202,6 @@ impl Default for KeyboardImplementation {
     }
 }
 
-impl Default for ModelUnloadTimeout {
-    fn default() -> Self {
-        ModelUnloadTimeout::Never
-    }
-}
-
 impl Default for PasteMethod {
     fn default() -> Self {
         // Default to CtrlV for macOS and Windows, Direct for Linux
@@ -212,18 +209,6 @@ impl Default for PasteMethod {
         return PasteMethod::Direct;
         #[cfg(not(target_os = "linux"))]
         return PasteMethod::CtrlV;
-    }
-}
-
-impl Default for ClipboardHandling {
-    fn default() -> Self {
-        ClipboardHandling::DontModify
-    }
-}
-
-impl Default for AutoSubmitKey {
-    fn default() -> Self {
-        AutoSubmitKey::Enter
     }
 }
 
@@ -268,18 +253,19 @@ impl SoundTheme {
         }
     }
 
-    pub fn to_start_path(&self) -> String {
+    pub fn to_start_path(self) -> String {
         format!("resources/{}_start.wav", self.as_str())
     }
 
-    pub fn to_stop_path(&self) -> String {
+    pub fn to_stop_path(self) -> String {
         format!("resources/{}_stop.wav", self.as_str())
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TypingTool {
+    #[default]
     Auto,
     Wtype,
     Kwtype,
@@ -288,14 +274,10 @@ pub enum TypingTool {
     Xdotool,
 }
 
-impl Default for TypingTool {
-    fn default() -> Self {
-        TypingTool::Auto
-    }
-}
-
 /* still handy for composing the initial JSON in the store ------------- */
-#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+// `Debug` est implémenté à la main plus bas pour masquer les clés API : un
+// `{:?}` sur les réglages ne doit jamais écrire un secret dans le journal.
+#[derive(Serialize, Deserialize, Clone, Type)]
 pub struct AppSettings {
     pub bindings: HashMap<String, ShortcutBinding>,
     pub push_to_talk: bool,
@@ -393,6 +375,91 @@ pub struct AppSettings {
     pub saved_processing_models: Vec<SavedProcessingModel>,
 }
 
+/// Valeur affichée à la place d'un secret dans le journal.
+const SECRET_MASK: &str = "[MASQUÉ]";
+
+/// Remplace les clés API non vides par un masque dans une représentation JSON
+/// des réglages.
+fn mask_secrets(value: &mut serde_json::Value) {
+    if let Some(key) = value.get_mut("gemini_api_key") {
+        if key.as_str().is_some_and(|k| !k.is_empty()) {
+            *key = serde_json::Value::String(SECRET_MASK.to_string());
+        }
+    }
+    if let Some(keys) = value
+        .get_mut("post_process_api_keys")
+        .and_then(|k| k.as_object_mut())
+    {
+        for key in keys.values_mut() {
+            if key.as_str().is_some_and(|k| !k.is_empty()) {
+                *key = serde_json::Value::String(SECRET_MASK.to_string());
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for AppSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+        mask_secrets(&mut value);
+        write!(f, "AppSettings {}", value)
+    }
+}
+
+impl AppSettings {
+    /// Copie destinée à l'export : sans aucune clé API, pour qu'un fichier de
+    /// réglages partagé ou synchronisé ne divulgue pas de secret.
+    pub fn without_secrets(&self) -> AppSettings {
+        let mut copy = self.clone();
+        copy.gemini_api_key = None;
+        for key in copy.post_process_api_keys.values_mut() {
+            key.clear();
+        }
+        copy
+    }
+
+    /// Prépare des réglages importés depuis un fichier : les champs sensibles
+    /// (clés API, script externe exécuté à chaque dictée, adresses des
+    /// fournisseurs qui reçoivent la clé) sont repris des réglages actuels et
+    /// jamais du fichier, qui peut venir d'un tiers.
+    pub fn sanitize_import(mut imported: AppSettings, current: &AppSettings) -> AppSettings {
+        imported.gemini_api_key = current.gemini_api_key.clone();
+        imported.post_process_api_keys = current.post_process_api_keys.clone();
+        imported.external_script_path = current.external_script_path.clone();
+        if imported.paste_method == PasteMethod::ExternalScript
+            && current.paste_method != PasteMethod::ExternalScript
+        {
+            imported.paste_method = current.paste_method;
+        }
+        for provider in imported.post_process_providers.iter_mut() {
+            match current
+                .post_process_providers
+                .iter()
+                .find(|p| p.id == provider.id)
+            {
+                Some(existing) => provider.base_url = existing.base_url.clone(),
+                None => {
+                    if let Some(default) = default_post_process_providers()
+                        .into_iter()
+                        .find(|p| p.id == provider.id)
+                    {
+                        provider.base_url = default.base_url;
+                    }
+                }
+            }
+        }
+        // Un fournisseur inconnu (absent des réglages actuels et des défauts)
+        // n'est pas importé : on ne sait pas où il enverrait les données.
+        imported.post_process_providers.retain(|p| {
+            current.post_process_providers.iter().any(|c| c.id == p.id)
+                || default_post_process_providers()
+                    .iter()
+                    .any(|d| d.id == p.id)
+        });
+        imported
+    }
+}
+
 fn default_model() -> String {
     "".to_string()
 }
@@ -433,7 +500,9 @@ fn default_debug_mode() -> bool {
 }
 
 fn default_log_level() -> LogLevel {
-    LogLevel::Debug
+    // « Info » par défaut : le niveau « debug » reste disponible dans les
+    // réglages avancés pour diagnostiquer un problème.
+    LogLevel::Info
 }
 
 fn default_word_correction_threshold() -> f64 {
@@ -834,87 +903,134 @@ impl AppSettings {
     }
 }
 
-pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
-    // Initialize store
-    let store = app
-        .store(SETTINGS_STORE_PATH)
-        .expect("Failed to initialize store");
+/// Lit les réglages stockés en tolérant un fichier partiellement invalide :
+/// d'abord tel quel, sinon champ par champ par-dessus les valeurs par défaut
+/// (un champ illisible est remplacé par sa valeur par défaut au lieu de faire
+/// perdre TOUS les réglages, clés API comprises). Le booléen indique si une
+/// réparation a été nécessaire.
+fn parse_settings_lenient(value: &serde_json::Value) -> (AppSettings, bool) {
+    if let Ok(settings) = serde_json::from_value::<AppSettings>(value.clone()) {
+        return (settings, false);
+    }
 
-    let mut settings = if let Some(settings_value) = store.get("settings") {
-        // Parse the entire settings object
-        match serde_json::from_value::<AppSettings>(settings_value) {
-            Ok(mut settings) => {
-                debug!("Found existing settings: {:?}", settings);
-                let default_settings = get_default_settings();
-                let mut updated = false;
-
-                // Merge default bindings into existing settings
-                for (key, value) in default_settings.bindings {
-                    if !settings.bindings.contains_key(&key) {
-                        debug!("Adding missing binding: {}", key);
-                        settings.bindings.insert(key, value);
-                        updated = true;
-                    }
-                }
-
-                if updated {
-                    debug!("Settings updated with new bindings");
-                    store.set("settings", serde_json::to_value(&settings).unwrap());
-                }
-
-                settings
+    let defaults = get_default_settings();
+    let Ok(mut merged) = serde_json::to_value(&defaults) else {
+        return (defaults, true);
+    };
+    if let (Some(stored), Some(target)) = (value.as_object(), merged.as_object_mut()) {
+        for (key, field) in stored {
+            if !target.contains_key(key) {
+                continue;
             }
-            Err(e) => {
-                warn!("Failed to parse settings: {}", e);
-                // Fall back to default settings if parsing fails
-                let default_settings = get_default_settings();
-                store.set("settings", serde_json::to_value(&default_settings).unwrap());
-                default_settings
+            let previous = target.insert(key.clone(), field.clone());
+            // On ne garde le champ stocké que s'il reste lisible.
+            if serde_json::from_value::<AppSettings>(serde_json::Value::Object(target.clone()))
+                .is_err()
+            {
+                warn!(
+                    "Réglage illisible ignoré, valeur par défaut utilisée : {}",
+                    key
+                );
+                if let Some(previous) = previous {
+                    target.insert(key.clone(), previous);
+                }
             }
         }
+    }
+    let settings = serde_json::from_value::<AppSettings>(merged).unwrap_or(defaults);
+    (settings, true)
+}
+
+/// Garde une copie du contenu brut des réglages avant de le réparer, pour ne
+/// rien perdre définitivement si la réparation se trompe.
+fn backup_unreadable_settings(app: &AppHandle, value: &serde_json::Value) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let file = dir.join(format!(
+        "settings_store.illisible-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => match std::fs::write(&file, json) {
+            Ok(()) => warn!("Copie des réglages illisibles conservée dans {:?}", file),
+            Err(e) => warn!("Impossible de sauvegarder les réglages illisibles : {}", e),
+        },
+        Err(e) => warn!("Impossible de sérialiser les réglages illisibles : {}", e),
+    }
+}
+
+/// Écrit les réglages dans le store (sans jamais paniquer).
+fn store_settings<R: tauri::Runtime>(store: &tauri_plugin_store::Store<R>, settings: &AppSettings) {
+    match serde_json::to_value(settings) {
+        Ok(value) => store.set("settings", value),
+        Err(e) => error!("Impossible d'enregistrer les réglages : {}", e),
+    }
+}
+
+/// Charge les réglages stockés (réparés si besoin) ou les valeurs par défaut.
+fn read_settings(app: &AppHandle) -> AppSettings {
+    let store = match app.store(SETTINGS_STORE_PATH) {
+        Ok(store) => store,
+        Err(e) => {
+            error!("Impossible d'ouvrir le store des réglages : {}", e);
+            return get_default_settings();
+        }
+    };
+
+    let mut settings = if let Some(settings_value) = store.get("settings") {
+        let (settings, repaired) = parse_settings_lenient(&settings_value);
+        if repaired {
+            warn!("Réglages partiellement illisibles : réparés avec les valeurs par défaut");
+            backup_unreadable_settings(app, &settings_value);
+            store_settings(&store, &settings);
+        }
+        settings
     } else {
         let default_settings = get_default_settings();
-        store.set("settings", serde_json::to_value(&default_settings).unwrap());
+        store_settings(&store, &default_settings);
         default_settings
     };
 
     if ensure_post_process_defaults(&mut settings) {
-        store.set("settings", serde_json::to_value(&settings).unwrap());
+        store_settings(&store, &settings);
+    }
+
+    settings
+}
+
+pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
+    let mut settings = read_settings(app);
+    // Les réglages complets ne sont jamais écrits dans le journal (clés API).
+    debug!("Settings loaded");
+
+    // Merge default bindings into existing settings
+    let mut updated = false;
+    for (key, value) in get_default_settings().bindings {
+        if let std::collections::hash_map::Entry::Vacant(entry) = settings.bindings.entry(key) {
+            debug!("Adding missing binding: {}", entry.key());
+            entry.insert(value);
+            updated = true;
+        }
+    }
+
+    if updated {
+        debug!("Settings updated with new bindings");
+        write_settings(app, settings.clone());
     }
 
     settings
 }
 
 pub fn get_settings(app: &AppHandle) -> AppSettings {
-    let store = app
-        .store(SETTINGS_STORE_PATH)
-        .expect("Failed to initialize store");
-
-    let mut settings = if let Some(settings_value) = store.get("settings") {
-        serde_json::from_value::<AppSettings>(settings_value).unwrap_or_else(|_| {
-            let default_settings = get_default_settings();
-            store.set("settings", serde_json::to_value(&default_settings).unwrap());
-            default_settings
-        })
-    } else {
-        let default_settings = get_default_settings();
-        store.set("settings", serde_json::to_value(&default_settings).unwrap());
-        default_settings
-    };
-
-    if ensure_post_process_defaults(&mut settings) {
-        store.set("settings", serde_json::to_value(&settings).unwrap());
-    }
-
-    settings
+    read_settings(app)
 }
 
 pub fn write_settings(app: &AppHandle, settings: AppSettings) {
-    let store = app
-        .store(SETTINGS_STORE_PATH)
-        .expect("Failed to initialize store");
-
-    store.set("settings", serde_json::to_value(&settings).unwrap());
+    match app.store(SETTINGS_STORE_PATH) {
+        Ok(store) => store_settings(&store, &settings),
+        Err(e) => error!("Impossible d'ouvrir le store des réglages : {}", e),
+    }
 }
 
 pub fn get_bindings(app: &AppHandle) -> HashMap<String, ShortcutBinding> {
@@ -926,9 +1042,22 @@ pub fn get_bindings(app: &AppHandle) -> HashMap<String, ShortcutBinding> {
 pub fn get_stored_binding(app: &AppHandle, id: &str) -> ShortcutBinding {
     let bindings = get_bindings(app);
 
-    let binding = bindings.get(id).unwrap().clone();
-
-    binding
+    // Raccourci absent des réglages : on retombe sur sa valeur par défaut
+    // plutôt que de faire paniquer l'application.
+    bindings
+        .get(id)
+        .cloned()
+        .or_else(|| get_default_settings().bindings.get(id).cloned())
+        .unwrap_or_else(|| {
+            warn!("Unknown binding requested: {}", id);
+            ShortcutBinding {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: String::new(),
+                default_binding: String::new(),
+                current_binding: String::new(),
+            }
+        })
 }
 
 pub fn get_history_limit(app: &AppHandle) -> usize {
@@ -950,5 +1079,93 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
+    }
+
+    fn settings_with_secrets() -> AppSettings {
+        let mut settings = get_default_settings();
+        settings.gemini_api_key = Some("cle-test-gemini-123".to_string());
+        settings
+            .post_process_api_keys
+            .insert("openai".to_string(), "cle-test-openai-456".to_string());
+        settings
+    }
+
+    #[test]
+    fn debug_output_masks_api_keys() {
+        let output = format!("{:?}", settings_with_secrets());
+        assert!(!output.contains("cle-test-gemini-123"));
+        assert!(!output.contains("cle-test-openai-456"));
+        assert!(output.contains(SECRET_MASK));
+    }
+
+    #[test]
+    fn export_copy_has_no_secret() {
+        let exported = settings_with_secrets().without_secrets();
+        assert!(exported.gemini_api_key.is_none());
+        assert!(exported
+            .post_process_api_keys
+            .values()
+            .all(|k| k.is_empty()));
+    }
+
+    #[test]
+    fn import_keeps_sensitive_fields_from_current_settings() {
+        let current = settings_with_secrets();
+        let mut imported = get_default_settings();
+        imported.gemini_api_key = Some("cle-du-fichier".to_string());
+        imported.external_script_path = Some("C:/malveillant.exe".to_string());
+        imported.paste_method = PasteMethod::ExternalScript;
+        if let Some(p) = imported
+            .post_process_providers
+            .iter_mut()
+            .find(|p| p.id == "openai")
+        {
+            p.base_url = "https://serveur-pirate.example".to_string();
+        }
+        imported.post_process_providers.push(PostProcessProvider {
+            id: "inconnu".to_string(),
+            label: "Inconnu".to_string(),
+            base_url: "https://ailleurs.example".to_string(),
+            allow_base_url_edit: true,
+            models_endpoint: None,
+            supports_structured_output: false,
+        });
+
+        let result = AppSettings::sanitize_import(imported, &current);
+
+        assert_eq!(result.gemini_api_key, current.gemini_api_key);
+        assert_eq!(result.external_script_path, None);
+        assert_ne!(result.paste_method, PasteMethod::ExternalScript);
+        let openai = result.post_process_provider("openai").unwrap();
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
+        assert!(result.post_process_provider("inconnu").is_none());
+    }
+
+    #[test]
+    fn lenient_parse_keeps_valid_fields_and_repairs_invalid_ones() {
+        let mut value = serde_json::to_value(settings_with_secrets()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.insert(
+            "history_limit".to_string(),
+            serde_json::json!("pas un nombre"),
+        );
+        obj.remove("push_to_talk");
+
+        let (settings, repaired) = parse_settings_lenient(&value);
+
+        assert!(repaired);
+        assert_eq!(
+            settings.gemini_api_key.as_deref(),
+            Some("cle-test-gemini-123")
+        );
+        assert_eq!(settings.history_limit, default_history_limit());
+        assert!(settings.push_to_talk);
+    }
+
+    #[test]
+    fn lenient_parse_does_not_flag_valid_settings() {
+        let value = serde_json::to_value(get_default_settings()).unwrap();
+        let (_, repaired) = parse_settings_lenient(&value);
+        assert!(!repaired);
     }
 }

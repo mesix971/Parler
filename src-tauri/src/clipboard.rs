@@ -12,6 +12,36 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(target_os = "linux")]
 use crate::utils::{is_kde_wayland, is_wayland};
 
+/// Délai entre l'envoi de la touche de collage et la restauration du
+/// presse-papiers : trop court, une application lente collerait l'ancien contenu.
+const CLIPBOARD_RESTORE_DELAY_MS: u64 = 120;
+
+/// Contenu du presse-papiers mis de côté pendant le collage.
+enum SavedClipboard {
+    Text(String),
+    /// Image copiée (capture d'écran…) : avant, elle était remplacée par du
+    /// texte vide après chaque dictée.
+    #[cfg(not(target_os = "linux"))]
+    Image(tauri::image::Image<'static>),
+    Empty,
+}
+
+fn save_clipboard(app_handle: &AppHandle) -> SavedClipboard {
+    let clipboard = app_handle.clipboard();
+    if let Ok(text) = clipboard.read_text() {
+        if !text.is_empty() {
+            return SavedClipboard::Text(text);
+        }
+    }
+    // Lecture d'image évitée sous Linux : elle peut bloquer sur le fil principal.
+    #[cfg(not(target_os = "linux"))]
+    if let Ok(image) = clipboard.read_image() {
+        return SavedClipboard::Image(image.to_owned());
+    }
+    // Limite connue : des fichiers copiés (Explorateur) ne sont pas restaurés.
+    SavedClipboard::Empty
+}
+
 /// Pastes text using the clipboard: saves current content, writes text, sends paste keystroke, restores clipboard.
 fn paste_via_clipboard(
     enigo: &mut Enigo,
@@ -21,7 +51,11 @@ fn paste_via_clipboard(
     paste_delay_ms: u64,
 ) -> Result<(), String> {
     let clipboard = app_handle.clipboard();
-    let clipboard_content = clipboard.read_text().unwrap_or_default();
+    let saved_content = save_clipboard(app_handle);
+    let clipboard_content = match &saved_content {
+        SavedClipboard::Text(text) => text.clone(),
+        _ => String::new(),
+    };
 
     // Write text to clipboard first
     // On Wayland, prefer wl-copy for better compatibility (especially with umlauts)
@@ -61,7 +95,7 @@ fn paste_via_clipboard(
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(Duration::from_millis(CLIPBOARD_RESTORE_DELAY_MS));
 
     // Restore original clipboard content
     // On Wayland, prefer wl-copy for better compatibility
@@ -73,7 +107,14 @@ fn paste_via_clipboard(
     }
 
     #[cfg(not(target_os = "linux"))]
-    let _ = clipboard.write_text(&clipboard_content);
+    match saved_content {
+        SavedClipboard::Image(image) => {
+            let _ = clipboard.write_image(&image);
+        }
+        _ => {
+            let _ = clipboard.write_text(&clipboard_content);
+        }
+    }
 
     Ok(())
 }

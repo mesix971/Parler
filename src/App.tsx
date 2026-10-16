@@ -95,6 +95,14 @@ function App() {
     };
   }, [settings?.debug_mode, updateSetting]);
 
+  // Section masquée (ex. Debug après Ctrl+Maj+D) : on revient à « Général »
+  // au lieu de continuer à afficher une page absente de la barre latérale.
+  useEffect(() => {
+    if (!SECTIONS_CONFIG[currentSection].enabled(settings)) {
+      setCurrentSection("general");
+    }
+  }, [currentSection, settings]);
+
   // Listen for backend navigation events (e.g., "Show History" shortcut)
   useEffect(() => {
     const unlisten = listen<string>("navigate-to-section", (event) => {
@@ -115,7 +123,15 @@ function App() {
 
       // Check if they have any models available
       const result = await commands.hasAnyModelsAvailable();
-      const hasModels = result.status === "ok" && result.data;
+      if (result.status === "error") {
+        // Impossible de savoir : on ouvre l'application plutôt que de
+        // renvoyer un utilisateur existant vers l'accueil.
+        console.error("Failed to check available models:", result.error);
+        setIsReturningUser(true);
+        setOnboardingStep("done");
+        return;
+      }
+      const hasModels = result.data;
 
       if (hasModels) {
         // Returning user - but check if they need to grant permissions on macOS
@@ -144,7 +160,8 @@ function App() {
       }
     } catch (error) {
       console.error("Failed to check onboarding status:", error);
-      setOnboardingStep("accessibility");
+      setIsReturningUser(true);
+      setOnboardingStep("done");
     }
   };
 

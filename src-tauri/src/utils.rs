@@ -22,6 +22,9 @@ pub fn cancel_current_operation(app: &AppHandle) {
 
     shortcut::unregister_cancel_shortcut(app);
     shortcut::unregister_pause_shortcut(app);
+    // Les raccourcis d'actions (Ctrl+1…9) ne doivent pas rester captés après
+    // une annulation, comme à la fin normale d'une dictée.
+    shortcut::unregister_action_shortcuts(app);
 
     // Cancel any ongoing recording
     let audio_manager = app.state::<Arc<AudioRecordingManager>>();

@@ -10,9 +10,12 @@ import { AppLanguageSelector } from "../AppLanguageSelector";
 import { ExportImportSettings } from "../ExportImportSettings";
 import { LogDirectory } from "../debug";
 
+/** Dépôt du code source de cette version (fork Windows de Parler). */
+const SOURCE_CODE_URL = "https://github.com/mesix971/Parler";
+
 export const AboutSettings: React.FC = () => {
   const { t } = useTranslation();
-  const [version, setVersion] = useState("");
+  const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchVersion = async () => {
@@ -21,7 +24,7 @@ export const AboutSettings: React.FC = () => {
         setVersion(appVersion);
       } catch (error) {
         console.error("Failed to get app version:", error);
-        setVersion("0.1.2");
+        setVersion("");
       }
     };
 
@@ -45,8 +48,16 @@ export const AboutSettings: React.FC = () => {
           description={t("settings.about.version.description")}
           grouped={true}
         >
-          {/* eslint-disable-next-line i18next/no-literal-string */}
-          <span className="text-sm font-mono">v{version}</span>
+          {version ? (
+            // eslint-disable-next-line i18next/no-literal-string
+            <span className="text-sm font-mono">v{version}</span>
+          ) : (
+            version !== null && (
+              <span className="text-sm text-text/60">
+                {t("settings.about.versionUnknown")}
+              </span>
+            )
+          )}
         </SettingContainer>
 
         <SettingContainer
@@ -67,7 +78,11 @@ export const AboutSettings: React.FC = () => {
           <Button
             variant="secondary"
             size="md"
-            onClick={() => openUrl("https://github.com/Melvynx/Handy")}
+            onClick={() =>
+              openUrl(SOURCE_CODE_URL).catch((error) =>
+                console.error("Failed to open source code link:", error),
+              )
+            }
           >
             {t("settings.about.sourceCode.button")}
           </Button>

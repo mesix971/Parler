@@ -229,7 +229,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 
     // Get the autostart manager and configure based on user setting
     let autostart_manager = app_handle.autolaunch();
-    let settings = settings::get_settings(&app_handle);
+    let settings = settings::get_settings(app_handle);
 
     if settings.autostart_enabled {
         // Enable autostart if user has opted in
@@ -241,6 +241,17 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 
     // Create the recording overlay window (hidden by default)
     utils::create_recording_overlay(app_handle);
+}
+
+/// Un serveur de mises à jour est-il configuré pour cette version ?
+fn updater_configured(app: &AppHandle) -> bool {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|updater| updater.get("endpoints"))
+        .and_then(|endpoints| endpoints.as_array())
+        .is_some_and(|endpoints| !endpoints.is_empty())
 }
 
 #[tauri::command]
@@ -364,6 +375,8 @@ pub fn run(cli_args: CliArgs) {
         commands::history::reprocess_history_entry,
         commands::gemini::change_gemini_api_key_setting,
         commands::gemini::change_gemini_model_setting,
+        commands::gemini::check_gemini_api_key,
+        commands::gemini::list_gemini_transcription_models,
         helpers::clamshell::is_laptop,
     ]);
 
@@ -375,6 +388,7 @@ pub fn run(cli_args: CliArgs) {
         )
         .expect("Failed to export typescript bindings");
 
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .device_event_filter(tauri::DeviceEventFilter::Always)
         .plugin(tauri_plugin_dialog::init())
@@ -434,7 +448,18 @@ pub fn run(cli_args: CliArgs) {
         ))
         .manage(cli_args.clone())
         .setup(move |app| {
-            let mut settings = get_settings(&app.handle());
+            let mut settings = get_settings(app.handle());
+
+            // Version sans serveur de mises à jour (tauri.conf.json : endpoints
+            // vides) : chaque vérification échouerait. On la désactive une fois
+            // pour toutes au lieu d'échouer en silence à chaque démarrage.
+            if settings.update_checks_enabled && !updater_configured(app.handle()) {
+                log::info!("No update endpoint configured: disabling update checks");
+                settings.update_checks_enabled = false;
+                let mut stored = get_settings(app.handle());
+                stored.update_checks_enabled = false;
+                settings::write_settings(app.handle(), stored);
+            }
 
             // CLI --debug flag overrides debug_mode and log level (runtime-only, not persisted)
             if cli_args.debug {
@@ -466,8 +491,10 @@ pub fn run(cli_args: CliArgs) {
             let tray_available = settings.show_tray_icon && !cli_args.no_tray;
             if !should_hide || !tray_available {
                 if let Some(main_window) = app_handle.get_webview_window("main") {
-                    main_window.show().unwrap();
-                    main_window.set_focus().unwrap();
+                    if let Err(e) = main_window.show() {
+                        log::error!("Failed to show main window: {}", e);
+                    }
+                    let _ = main_window.set_focus();
                 }
             }
 
@@ -475,9 +502,8 @@ pub fn run(cli_args: CliArgs) {
         })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
-                let tray_visible =
-                    TRAY_ICON_ENABLED.load(Ordering::Relaxed)
-                        && !window.app_handle().state::<CliArgs>().no_tray;
+                let tray_visible = TRAY_ICON_ENABLED.load(Ordering::Relaxed)
+                    && !window.app_handle().state::<CliArgs>().no_tray;
 
                 #[cfg(target_os = "windows")]
                 {
@@ -508,7 +534,7 @@ pub fn run(cli_args: CliArgs) {
             tauri::WindowEvent::ThemeChanged(theme) => {
                 log::info!("Theme changed to: {:?}", theme);
                 // Update tray icon to match new theme, maintaining idle state
-                utils::change_tray_icon(&window.app_handle(), utils::TrayIconState::Idle);
+                utils::change_tray_icon(window.app_handle(), utils::TrayIconState::Idle);
             }
             _ => {}
         })

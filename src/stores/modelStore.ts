@@ -259,13 +259,13 @@ export const useModelStore = create<ModelsStore>()(
 
     initialize: async () => {
       if (get().initialized) return;
+      // Marqué tout de suite : deux appels simultanés n'enregistrent pas les
+      // écouteurs en double.
+      set({ initialized: true });
 
-      const { loadModels, loadCurrentModel, checkFirstRun } = get();
-
-      // Load initial data
-      await Promise.all([loadModels(), loadCurrentModel(), checkFirstRun()]);
-
-      // Set up event listeners
+      // Écouteurs AVANT le chargement initial, pour ne perdre aucun événement
+      // émis pendant ce chargement. Le store vit aussi longtemps que
+      // l'application : ces écouteurs ne sont volontairement jamais retirés.
       listen<DownloadProgress>("model-download-progress", (event) => {
         const progress = event.payload;
         set(
@@ -376,7 +376,10 @@ export const useModelStore = create<ModelsStore>()(
         get().loadCurrentModel();
       });
 
-      set({ initialized: true });
+      const { loadModels, loadCurrentModel, checkFirstRun } = get();
+
+      // Load initial data
+      await Promise.all([loadModels(), loadCurrentModel(), checkFirstRun()]);
     },
   })),
 );

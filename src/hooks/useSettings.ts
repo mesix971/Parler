@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useSettingsStore } from "../stores/settingsStore";
 import type { AppSettings as Settings, AudioDevice } from "@/bindings";
 
@@ -44,7 +45,35 @@ interface UseSettingsReturn {
 }
 
 export const useSettings = (): UseSettingsReturn => {
-  const store = useSettingsStore();
+  // Abonnement limité aux champs utilisés (comparaison superficielle) : les
+  // composants ne se re-rendent plus pour des changements qui ne les
+  // concernent pas (sons personnalisés, réglages par défaut…).
+  const store = useSettingsStore(
+    useShallow((s) => ({
+      settings: s.settings,
+      isLoading: s.isLoading,
+      // Lu via isUpdatingKey, mais sélectionné pour re-rendre à chaque changement
+      isUpdatingMap: s.isUpdating,
+      audioDevices: s.audioDevices,
+      outputDevices: s.outputDevices,
+      postProcessModelOptions: s.postProcessModelOptions,
+      initialize: s.initialize,
+      isUpdatingKey: s.isUpdatingKey,
+      updateSetting: s.updateSetting,
+      resetSetting: s.resetSetting,
+      refreshSettings: s.refreshSettings,
+      refreshAudioDevices: s.refreshAudioDevices,
+      refreshOutputDevices: s.refreshOutputDevices,
+      updateBinding: s.updateBinding,
+      resetBinding: s.resetBinding,
+      getSetting: s.getSetting,
+      setPostProcessProvider: s.setPostProcessProvider,
+      updatePostProcessBaseUrl: s.updatePostProcessBaseUrl,
+      updatePostProcessApiKey: s.updatePostProcessApiKey,
+      updatePostProcessModel: s.updatePostProcessModel,
+      fetchPostProcessModels: s.fetchPostProcessModels,
+    })),
+  );
 
   // Initialize on first mount
   useEffect(() => {

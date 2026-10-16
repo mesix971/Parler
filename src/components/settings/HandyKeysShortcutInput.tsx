@@ -7,6 +7,7 @@ import { SettingContainer } from "../ui/SettingContainer";
 import { useSettings } from "../../hooks/useSettings";
 import { useOsType } from "../../hooks/useOsType";
 import { commands } from "@/bindings";
+import { unwrap } from "@/lib/utils/result";
 import { toast } from "sonner";
 
 interface HandyKeysShortcutInputProps {
@@ -189,7 +190,7 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
 
     // Start backend recording
     try {
-      await commands.startHandyKeysRecording(shortcutId);
+      await unwrap(commands.startHandyKeysRecording(shortcutId));
       setIsRecording(true);
       setCurrentKeys("");
       currentKeysRef.current = "";

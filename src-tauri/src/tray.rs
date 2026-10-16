@@ -89,8 +89,10 @@ pub fn update_tray_menu(app: &AppHandle, state: &TrayIconState, locale: Option<&
     // Platform-specific accelerators
     #[cfg(target_os = "macos")]
     let (settings_accelerator, quit_accelerator) = (Some("Cmd+,"), Some("Cmd+Q"));
+    // Pas de « Ctrl+Q » pour Quitter sous Windows/Linux : c'est un raccourci
+    // courant de dictée (push-to-talk), l'afficher dans le menu prête à confusion.
     #[cfg(not(target_os = "macos"))]
-    let (settings_accelerator, quit_accelerator) = (Some("Ctrl+,"), Some("Ctrl+Q"));
+    let (settings_accelerator, quit_accelerator) = (Some("Ctrl+,"), None::<&str>);
 
     // Create common menu items
     let version_label = if cfg!(debug_assertions) {

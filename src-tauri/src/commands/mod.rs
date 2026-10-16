@@ -133,22 +133,26 @@ pub fn open_app_data_dir(app: AppHandle) -> Result<(), String> {
 #[specta::specta]
 #[tauri::command]
 pub fn export_settings(app: AppHandle, path: String) -> Result<(), String> {
-    let settings = get_settings(&app);
+    // Le fichier exporté peut être partagé ou synchronisé (OneDrive…) :
+    // il ne contient jamais les clés API.
+    let settings = get_settings(&app).without_secrets();
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
-    log::info!("Settings exported to {}", path);
+    std::fs::write(&path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+    log::info!("Settings exported to {} (API keys excluded)", path);
     Ok(())
 }
 
 #[specta::specta]
 #[tauri::command]
 pub fn import_settings(app: AppHandle, path: String) -> Result<(), String> {
-    let json = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-    let settings: AppSettings = serde_json::from_str(&json)
-        .map_err(|e| format!("Invalid settings file: {}", e))?;
+    let json = std::fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let imported: AppSettings =
+        serde_json::from_str(&json).map_err(|e| format!("Invalid settings file: {}", e))?;
+    // Clés API, script externe et adresses des fournisseurs restent ceux
+    // d'avant l'import : un fichier reçu d'un tiers ne peut ni exécuter un
+    // programme ni détourner une clé.
+    let settings = AppSettings::sanitize_import(imported, &get_settings(&app));
     write_settings(&app, settings);
     log::info!("Settings imported from {}", path);
     Ok(())

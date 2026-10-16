@@ -1,7 +1,18 @@
 use crate::input;
 use crate::settings;
 use crate::settings::OverlayPosition;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
+
+/// Incrémenté à chaque affichage de l'overlay. Un masquage différé (fin
+/// d'animation, fin d'un message d'erreur) ne cache la fenêtre que si aucun
+/// nouvel affichage n'a eu lieu entre-temps — sinon une dictée relancée
+/// aussitôt verrait son overlay disparaître.
+static OVERLAY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Durée d'affichage d'un message d'erreur dans l'overlay.
+const ERROR_DISPLAY_DURATION: Duration = Duration::from_millis(3500);
 
 #[cfg(not(target_os = "macos"))]
 use log::debug;
@@ -327,6 +338,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     }
 
     match builder.build() {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         Ok(window) => {
             #[cfg(target_os = "linux")]
             {
@@ -383,10 +395,22 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     }
 }
 
-fn show_overlay_state(app_handle: &AppHandle, state: &str) {
+/// Génération courante de l'overlay. Une dictée la relève après chaque
+/// affichage ; si elle a changé au moment de terminer, c'est qu'une nouvelle
+/// dictée a commencé entre-temps et l'ancienne ne doit plus toucher à
+/// l'overlay ni à l'icône.
+pub fn current_overlay_generation() -> u64 {
+    OVERLAY_GENERATION.load(Ordering::SeqCst)
+}
+
+fn show_overlay_state(app_handle: &AppHandle, state: &str) -> bool {
+    // Incrémentée même si l'overlay est désactivé : le compteur sert aussi à
+    // savoir quelle dictée est la plus récente.
+    OVERLAY_GENERATION.fetch_add(1, Ordering::SeqCst);
+
     let settings = settings::get_settings(app_handle);
     if settings.overlay_position == OverlayPosition::None {
-        return;
+        return false;
     }
 
     update_overlay_position(app_handle);
@@ -398,7 +422,30 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
         force_overlay_topmost(&overlay_window);
 
         let _ = overlay_window.emit("show-overlay", state);
+        return true;
     }
+    false
+}
+
+/// Affiche un message d'erreur dans l'overlay pendant quelques secondes, puis
+/// le masque. `code` est traduit côté interface (ex. « gemini_invalid_key »).
+/// Si l'overlay est désactivé dans les réglages, l'erreur reste visible via
+/// l'icône de la zone de notification et le journal.
+pub fn show_error_overlay(app_handle: &AppHandle, code: &str) {
+    if !show_overlay_state(app_handle, "error") {
+        return;
+    }
+    let generation = OVERLAY_GENERATION.load(Ordering::SeqCst);
+    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
+        let _ = overlay_window.emit("overlay-error", code);
+    }
+    let app = app_handle.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(ERROR_DISPLAY_DURATION);
+        if OVERLAY_GENERATION.load(Ordering::SeqCst) == generation {
+            hide_recording_overlay(&app);
+        }
+    });
 }
 
 /// Shows the recording overlay window with fade-in animation
@@ -436,13 +483,17 @@ pub fn hide_recording_overlay(app_handle: &AppHandle) {
     // Always hide the overlay regardless of settings - if setting was changed while recording,
     // we still want to hide it properly
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
+        let generation = OVERLAY_GENERATION.load(Ordering::SeqCst);
         // Emit event to trigger fade-out animation
         let _ = overlay_window.emit("hide-overlay", ());
-        // Hide the window after a short delay to allow animation to complete
+        // Hide the window after a short delay to allow animation to complete,
+        // unless the overlay was shown again in the meantime.
         let window_clone = overlay_window.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            let _ = window_clone.hide();
+            std::thread::sleep(Duration::from_millis(300));
+            if OVERLAY_GENERATION.load(Ordering::SeqCst) == generation {
+                let _ = window_clone.hide();
+            }
         });
     }
 }
@@ -468,12 +519,22 @@ pub fn emit_recording_paused(app_handle: &AppHandle, paused: bool) {
     }
 }
 
-pub fn emit_levels(app_handle: &AppHandle, levels: &Vec<f32>) {
-    // emit levels to main app
-    let _ = app_handle.emit("mic-level", levels);
+/// Intervalle minimal entre deux envois de niveaux micro (≈ 30 images/s) :
+/// le micro en produit ≈ 95 par seconde, bien plus que l'écran n'en affiche.
+const LEVELS_MIN_INTERVAL: Duration = Duration::from_millis(33);
 
-    // also emit to the recording overlay if it's open
-    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
-        let _ = overlay_window.emit("mic-level", levels);
+pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    static LAST_EMIT_MS: AtomicU64 = AtomicU64::new(0);
+
+    let now_ms = START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1;
+    let last = LAST_EMIT_MS.load(Ordering::Relaxed);
+    if last != 0 && now_ms.saturating_sub(last) < LEVELS_MIN_INTERVAL.as_millis() as u64 {
+        return;
     }
+    LAST_EMIT_MS.store(now_ms, Ordering::Relaxed);
+
+    // Un seul envoi : `emit` diffuse déjà à toutes les fenêtres, overlay compris
+    // (l'ancien double envoi faisait arriver chaque niveau deux fois).
+    let _ = app_handle.emit("mic-level", levels);
 }

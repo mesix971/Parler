@@ -63,6 +63,7 @@ pub fn is_laptop() -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
     use super::*;
 
     #[test]

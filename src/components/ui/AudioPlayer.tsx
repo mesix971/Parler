@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Play, Pause } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 interface AudioPlayerProps {
   /** Audio source URL. If not provided, onLoadRequest must be provided. */
@@ -16,6 +17,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   className = "",
   autoPlay = false,
 }) => {
+  const { t } = useTranslation();
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -235,7 +237,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
         onClick={togglePlay}
         disabled={isLoading}
         className="transition-colors cursor-pointer text-text hover:text-logo-primary disabled:opacity-50"
-        aria-label={isPlaying ? "Pause" : "Play"}
+        aria-label={isPlaying ? t("common.pause") : t("common.play")}
       >
         {isPlaying ? (
           <Pause width={20} height={20} fill="currentColor" />

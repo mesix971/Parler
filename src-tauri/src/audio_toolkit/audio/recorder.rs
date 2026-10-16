@@ -25,6 +25,15 @@ enum Cmd {
     Shutdown,
 }
 
+/// Délai maximal d'ouverture du flux micro avant de déclarer l'échec.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Délai maximal pour récupérer l'audio à l'arrêt : sans lui, un micro qui
+/// n'envoie plus rien (casque débranché) bloquait l'application pour toujours.
+const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+/// Le fil de traitement vérifie les commandes au moins à ce rythme, même
+/// quand le micro ne produit plus d'audio.
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 pub struct AudioRecorder {
     device: Option<Device>,
     cmd_tx: Option<mpsc::Sender<Cmd>>,
@@ -32,6 +41,8 @@ pub struct AudioRecorder {
     vad: Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
     pause_flag: Option<Arc<AtomicBool>>,
+    /// Passe à faux si le pilote signale une erreur de flux (micro débranché…).
+    healthy: Arc<AtomicBool>,
 }
 
 impl AudioRecorder {
@@ -43,7 +54,13 @@ impl AudioRecorder {
             vad: None,
             level_cb: None,
             pause_flag: None,
+            healthy: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    /// Le flux ouvert fonctionne-t-il encore ?
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
     }
 
     pub fn with_vad(mut self, vad: Box<dyn VoiceActivityDetector>) -> Self {
@@ -85,52 +102,48 @@ impl AudioRecorder {
         // Move the optional level callback into the worker thread
         let level_cb = self.level_cb.clone();
         let pause_flag = self.pause_flag.clone();
+        let healthy = Arc::clone(&self.healthy);
+        healthy.store(true, Ordering::Relaxed);
+
+        // Le fil signale le résultat de l'ouverture : une erreur (micro absent,
+        // format non géré…) est renvoyée à l'appelant au lieu de faire paniquer
+        // le fil en silence et de laisser croire que le micro est ouvert.
+        let (init_tx, init_rx) = mpsc::channel::<Result<(), String>>();
 
         let worker = std::thread::spawn(move || {
-            let config = AudioRecorder::get_preferred_config(&thread_device)
-                .expect("failed to fetch preferred config");
-
-            let sample_rate = config.sample_rate().0;
-            let channels = config.channels() as usize;
-
-            log::info!(
-                "Using device: {:?}\nSample rate: {}\nChannels: {}\nFormat: {:?}",
-                thread_device.name(),
-                sample_rate,
-                channels,
-                config.sample_format()
-            );
-
-            let stream = match config.sample_format() {
-                cpal::SampleFormat::U8 => {
-                    AudioRecorder::build_stream::<u8>(&thread_device, &config, sample_tx, channels)
-                        .unwrap()
-                }
-                cpal::SampleFormat::I8 => {
-                    AudioRecorder::build_stream::<i8>(&thread_device, &config, sample_tx, channels)
-                        .unwrap()
-                }
-                cpal::SampleFormat::I16 => {
-                    AudioRecorder::build_stream::<i16>(&thread_device, &config, sample_tx, channels)
-                        .unwrap()
-                }
-                cpal::SampleFormat::I32 => {
-                    AudioRecorder::build_stream::<i32>(&thread_device, &config, sample_tx, channels)
-                        .unwrap()
-                }
-                cpal::SampleFormat::F32 => {
-                    AudioRecorder::build_stream::<f32>(&thread_device, &config, sample_tx, channels)
-                        .unwrap()
-                }
-                _ => panic!("unsupported sample format"),
-            };
-
-            stream.play().expect("failed to start stream");
+            let stream =
+                match AudioRecorder::open_stream(&thread_device, sample_tx, Arc::clone(&healthy)) {
+                    Ok(opened) => opened,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e));
+                        return;
+                    }
+                };
+            let (stream, sample_rate) = stream;
+            let _ = init_tx.send(Ok(()));
 
             // keep the stream alive while we process samples
             run_consumer(sample_rate, vad, sample_rx, cmd_rx, level_cb, pause_flag);
             // stream is dropped here, after run_consumer returns
+            drop(stream);
         });
+
+        match init_rx.recv_timeout(OPEN_TIMEOUT) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let _ = worker.join();
+                return Err(Box::new(Error::other(e)));
+            }
+            Err(_) => {
+                // Le fil est bloqué ou mort : on ne garde rien, il se terminera
+                // de lui-même quand ses canaux seront fermés.
+                drop(cmd_tx);
+                return Err(Box::new(Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "microphone did not open in time",
+                )));
+            }
+        }
 
         self.device = Some(device);
         self.cmd_tx = Some(cmd_tx);
@@ -139,19 +152,69 @@ impl AudioRecorder {
         Ok(())
     }
 
+    /// Ouvre et démarre le flux d'entrée ; renvoie le flux et sa fréquence.
+    fn open_stream(
+        device: &Device,
+        sample_tx: mpsc::Sender<Vec<f32>>,
+        healthy: Arc<AtomicBool>,
+    ) -> Result<(cpal::Stream, u32), String> {
+        let config = AudioRecorder::get_preferred_config(device)
+            .map_err(|e| format!("failed to fetch preferred config: {e}"))?;
+
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels() as usize;
+
+        log::info!(
+            "Using device: {:?}\nSample rate: {}\nChannels: {}\nFormat: {:?}",
+            device.name(),
+            sample_rate,
+            channels,
+            config.sample_format()
+        );
+
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::U8 => {
+                AudioRecorder::build_stream::<u8>(device, &config, sample_tx, channels, healthy)
+            }
+            cpal::SampleFormat::I8 => {
+                AudioRecorder::build_stream::<i8>(device, &config, sample_tx, channels, healthy)
+            }
+            cpal::SampleFormat::I16 => {
+                AudioRecorder::build_stream::<i16>(device, &config, sample_tx, channels, healthy)
+            }
+            cpal::SampleFormat::I32 => {
+                AudioRecorder::build_stream::<i32>(device, &config, sample_tx, channels, healthy)
+            }
+            cpal::SampleFormat::F32 => {
+                AudioRecorder::build_stream::<f32>(device, &config, sample_tx, channels, healthy)
+            }
+            other => return Err(format!("unsupported sample format: {other:?}")),
+        }
+        .map_err(|e| format!("failed to build input stream: {e}"))?;
+
+        stream
+            .play()
+            .map_err(|e| format!("failed to start stream: {e}"))?;
+
+        Ok((stream, sample_rate))
+    }
+
     pub fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(tx) = &self.cmd_tx {
-            tx.send(Cmd::Start)?;
+        match &self.cmd_tx {
+            Some(tx) => tx.send(Cmd::Start)?,
+            None => return Err("recorder is not open".into()),
         }
         Ok(())
     }
 
     pub fn stop(&self) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        if let Some(tx) = &self.cmd_tx {
-            tx.send(Cmd::Stop(resp_tx))?;
+        match &self.cmd_tx {
+            Some(tx) => tx.send(Cmd::Stop(resp_tx))?,
+            None => return Err("recorder is not open".into()),
         }
-        Ok(resp_rx.recv()?) // wait for the samples
+        // wait for the samples, but never forever
+        Ok(resp_rx.recv_timeout(STOP_TIMEOUT)?)
     }
 
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -170,15 +233,17 @@ impl AudioRecorder {
         config: &cpal::SupportedStreamConfig,
         sample_tx: mpsc::Sender<Vec<f32>>,
         channels: usize,
+        healthy: Arc<AtomicBool>,
     ) -> Result<cpal::Stream, cpal::BuildStreamError>
     where
         T: Sample + SizedSample + Send + 'static,
         f32: cpal::FromSample<T>,
     {
-        let mut output_buffer = Vec::new();
+        let mut output_buffer: Vec<f32> = Vec::new();
 
         let stream_cb = move |data: &[T], _: &cpal::InputCallbackInfo| {
-            output_buffer.clear();
+            // Nouveau tampon à chaque appel : il est envoyé tel quel (sans copie).
+            output_buffer.reserve(data.len() / channels.max(1));
 
             if channels == 1 {
                 // Direct conversion without intermediate Vec
@@ -198,7 +263,7 @@ impl AudioRecorder {
                 }
             }
 
-            if sample_tx.send(output_buffer.clone()).is_err() {
+            if sample_tx.send(std::mem::take(&mut output_buffer)).is_err() {
                 log::error!("Failed to send samples");
             }
         };
@@ -206,7 +271,10 @@ impl AudioRecorder {
         device.build_input_stream(
             &config.clone().into(),
             stream_cb,
-            |err| log::error!("Stream error: {}", err),
+            move |err| {
+                log::error!("Stream error: {}", err);
+                healthy.store(false, Ordering::Relaxed);
+            },
             None,
         )
     }
@@ -289,7 +357,9 @@ fn run_consumer(
         }
 
         if let Some(vad_arc) = vad {
-            let mut det = vad_arc.lock().unwrap();
+            let mut det = vad_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             match det.push_frame(samples).unwrap_or(VadFrame::Speech(samples)) {
                 VadFrame::Speech(buf) => out_buf.extend_from_slice(buf),
                 VadFrame::Noise => {}
@@ -300,37 +370,48 @@ fn run_consumer(
     }
 
     loop {
-        let raw = match sample_rx.recv() {
-            Ok(s) => s,
-            Err(_) => break, // stream closed
-        };
+        // Attente bornée : les commandes (dont Stop) sont traitées même si le
+        // micro n'envoie plus rien, au lieu de bloquer l'arrêt indéfiniment.
+        match sample_rx.recv_timeout(COMMAND_POLL_INTERVAL) {
+            Ok(raw) => {
+                // ---------- spectrum processing -------------------------- //
+                if let Some(buckets) = visualizer.feed(&raw) {
+                    if let Some(cb) = &level_cb {
+                        cb(buckets);
+                    }
+                }
 
-        // ---------- spectrum processing ---------------------------------- //
-        if let Some(buckets) = visualizer.feed(&raw) {
-            if let Some(cb) = &level_cb {
-                cb(buckets);
+                // ---------- existing pipeline ---------------------------- //
+                let is_paused = pause_flag
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::Relaxed));
+                if !is_paused {
+                    frame_resampler.push(&raw, &mut |frame: &[f32]| {
+                        handle_frame(frame, recording, &vad, &mut processed_samples)
+                    });
+                }
             }
-        }
-
-        // ---------- existing pipeline ------------------------------------ //
-        let is_paused = pause_flag
-            .as_ref()
-            .map_or(false, |f| f.load(Ordering::Relaxed));
-        if !is_paused {
-            frame_resampler.push(&raw, &mut |frame: &[f32]| {
-                handle_frame(frame, recording, &vad, &mut processed_samples)
-            });
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // stream closed
         }
 
         // non-blocking check for a command
-        while let Ok(cmd) = cmd_rx.try_recv() {
+        loop {
+            let cmd = match cmd_rx.try_recv() {
+                Ok(cmd) => cmd,
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Plus personne pour piloter l'enregistreur : on libère le micro.
+                Err(mpsc::TryRecvError::Disconnected) => return,
+            };
             match cmd {
                 Cmd::Start => {
                     processed_samples.clear();
                     recording = true;
                     visualizer.reset(); // Reset visualization buffer
                     if let Some(v) = &vad {
-                        v.lock().unwrap().reset();
+                        v.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .reset();
                     }
                 }
                 Cmd::Stop(reply_tx) => {

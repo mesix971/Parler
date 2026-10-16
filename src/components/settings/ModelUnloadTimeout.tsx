@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useSettings } from "../../hooks/useSettings";
-import { commands, type ModelUnloadTimeout } from "@/bindings";
+import type { ModelUnloadTimeout } from "@/bindings";
 import { Dropdown } from "../ui/Dropdown";
 import { SettingContainer } from "../ui/SettingContainer";
 
@@ -56,15 +56,9 @@ export const ModelUnloadTimeoutSetting: React.FC<ModelUnloadTimeoutProps> = ({
     },
   ];
 
-  const handleChange = async (event: React.ChangeEvent<HTMLSelectElement>) => {
-    const newTimeout = event.target.value as ModelUnloadTimeout;
-
-    try {
-      await commands.setModelUnloadTimeout(newTimeout);
-      updateSetting("model_unload_timeout", newTimeout);
-    } catch (error) {
-      console.error("Failed to update model unload timeout:", error);
-    }
+  // Le store appelle lui-même la commande du backend (un seul appel).
+  const handleChange = (value: string) => {
+    void updateSetting("model_unload_timeout", value as ModelUnloadTimeout);
   };
 
   const currentValue = getSetting("model_unload_timeout") ?? "never";
@@ -83,11 +77,7 @@ export const ModelUnloadTimeoutSetting: React.FC<ModelUnloadTimeoutProps> = ({
       <Dropdown
         options={options}
         selectedValue={currentValue}
-        onSelect={(value) =>
-          handleChange({
-            target: { value },
-          } as React.ChangeEvent<HTMLSelectElement>)
-        }
+        onSelect={handleChange}
         disabled={false}
       />
     </SettingContainer>

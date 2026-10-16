@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.10.0] - 2026-10-17
+
+### Ajouté
+
+- Choix du modèle Gemini de transcription dans les réglages (Général), avec la liste des modèles réellement disponibles pour la clé ; `gemini-3.5-transcribe`, dédié à la transcription, est signalé comme recommandé.
+
+### Corrigé
+
+- Liste des modèles Gemini complète (elle s'arrêtait aux 50 premiers modèles renvoyés par Google).
+
+## [0.9.0] - 2026-10-16
+
+Version Windows (fork mesix971/Parler), après audit complet.
+
+### Ajouté
+
+- Messages d'erreur dans la pastille de dictée : micro indisponible, rien entendu, clé Gemini invalide, quota dépassé, réseau coupé, délai dépassé, retouche IA en échec, collage impossible.
+- La clé API Gemini est vérifiée auprès de Google avant d'être enregistrée.
+- Compatible avec `gemini-3.5-transcribe`, le modèle Gemini dédié à la transcription (texte renvoyé dans `audioTranscription`).
+- Une dictée dont la transcription échoue reste dans l'historique (audio conservé) pour être retraitée.
+- Traduction française complète (60 textes manquants) et textes de l'interface traduits.
+
+### Corrigé
+
+- La clé API n'est plus écrite en clair dans le journal ; le texte dicté non plus.
+- Profil de build Windows : LTO « thin » et `panic = "unwind"` (le LTO complet faisait planter whisper.cpp).
+- Appels Gemini et LLM bornés par des délais : plus de « Transcription… » sans fin si le réseau cale.
+- Le micro ne peut plus geler l'application (ouverture vérifiée, arrêt borné, flux cassé rouvert).
+- Pastille fantôme quand le micro ne démarrait pas ; pastille masquée par erreur quand on relançait une dictée aussitôt.
+- Animations de la pastille et nom d'action désormais visible (affiché dans la pastille).
+- Les refus du backend dans les réglages sont détectés (retour à l'ancienne valeur + message).
+- Historique : noms de fichiers uniques à la milliseconde, suppressions transactionnelles, fichiers audio orphelins nettoyés, base illisible mise de côté au lieu de bloquer le démarrage.
+- Import de réglages sécurisé (clés, script externe et adresses des fournisseurs conservés) ; export sans clés API.
+- Réglages partiellement illisibles réparés champ par champ au lieu d'être tous réinitialisés.
+
+### Amélioré
+
+- Environ 370 ms gagnées à chaque fin de dictée (micro fermé en arrière-plan) et connexion Gemini réutilisée ; réflexion désactivée sur Gemini 2.5 Flash.
+- Sécurité de la fenêtre : CSP, accès aux fichiers limité aux enregistrements, droits séparés par fenêtre.
+- Accessibilité : navigation au clavier, boutons étiquetés, contrastes de la pastille.
+- Dépendance `geist` retirée (alertes de sécurité de Next.js) ; outils de build mis à jour.
+- Livrable nommé `Parler-Setup-0.9.0.exe` via `bun run build:windows`.
+
 ## [0.3.0] - 2025-07-11
 
 ### Added

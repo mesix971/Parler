@@ -14,7 +14,8 @@
     "postProcessing": "Post-traitement",
     "history": "Historique",
     "debug": "Débogage",
-    "about": "À propos"
+    "about": "À propos",
+    "navigation": "Sections des réglages"
   },
   "onboarding": {
     "subtitle": "Pour commencer, choisissez un modèle de transcription",
@@ -75,6 +76,10 @@
       "sense-voice-int8": {
         "name": "SenseVoice",
         "description": "Très rapide. Chinois, anglais, japonais, coréen, cantonais."
+      },
+      "gemini-api": {
+        "name": "API Gemini",
+        "description": "Transcription dans le cloud via Google Gemini. Nécessite une clé API et Internet."
       }
     },
     "errors": {
@@ -112,6 +117,7 @@
     "extractingMultiple": "Extraction de {{count}} modèles...",
     "extractingGeneric": "Extraction...",
     "downloading": "Téléchargement {{percentage}}%",
+    "downloadingGeneric": "Téléchargement...",
     "downloadingMultiple": "Téléchargement de {{count}} modèles...",
     "modelReady": "Modèle Prêt",
     "loading": "Chargement de {{modelName}}...",
@@ -121,39 +127,37 @@
     "noModelDownloadRequired": "Aucun Modèle - Téléchargement Requis",
     "deleteModel": "Supprimer {{modelName}}",
     "downloadSpeed": "{{speed}} Mo/s",
+    "cancel": "Annuler",
+    "cancelDownload": "Annuler le téléchargement",
     "capabilities": {
       "languageSelection": "Prend en charge plusieurs langues d'entrée",
-      "multiLanguage": "Multilingue",
-      "translation": "Peut traduire en anglais",
-      "translate": "Traduire en anglais",
       "singleLanguage": "Prend en charge uniquement cette langue",
-      "languageOnly": "{{language}} uniquement"
+      "multiLanguage": "Multilingue",
+      "languageOnly": "{{language}} uniquement",
+      "translation": "Peut traduire en anglais",
+      "translate": "Traduire en anglais"
     },
-    "cancel": "Annuler",
-    "cancelDownload": "Annuler le téléchargement"
+    "statusTitle": "État du modèle : {{status}}",
+    "errors": {
+      "statusCheckFailed": "Impossible de vérifier l'état du modèle",
+      "loadFailed": "Échec du chargement du modèle",
+      "switchFailed": "Impossible de changer de modèle"
+    }
   },
   "settings": {
     "modelSettings": {
       "title": "Paramètres de {{model}}",
       "noSettingsNeeded": "Ce modèle fonctionne automatiquement sans configuration nécessaire."
     },
-    "models": {
-      "title": "Modèles de Transcription",
-      "description": "Sélectionnez un modèle de transcription ou téléchargez des modèles supplémentaires. Différents modèles offrent différents niveaux de précision et de vitesse.",
-      "downloaded": "Téléchargés",
-      "available": "Disponibles au Téléchargement",
-      "deleteConfirm": "Êtes-vous sûr de vouloir supprimer {{modelName}} ? Vous devrez le télécharger à nouveau pour l'utiliser.",
-      "deleteActiveConfirm": "{{modelName}} est votre modèle actif. Le supprimer arrêtera les transcriptions jusqu'à ce que vous sélectionniez un nouveau modèle. Êtes-vous sûr ?",
-      "deleteTitle": "Supprimer le modèle",
-      "filters": {
-        "all": "Tous",
-        "multiLanguage": "Multilingue",
-        "translation": "Traduction",
-        "allLanguages": "Toutes les langues"
-      },
-      "noModelsMatch": "Aucun modèle ne correspond à ce filtre.",
-      "yourModels": "Modèles téléchargés",
-      "availableModels": "Disponibles au téléchargement"
+    "longAudioModel": {
+      "title": "Modèle pour l'audio long",
+      "description": "Passer automatiquement à un autre modèle quand l'enregistrement dépasse la durée choisie.",
+      "modelLabel": "Modèle pour les longs enregistrements",
+      "modelDescription": "Choisissez le modèle à utiliser au-delà de la durée choisie.",
+      "thresholdLabel": "Seuil de durée (secondes)",
+      "thresholdDescription": "Passer au modèle pour l'audio long quand l'enregistrement dépasse cette durée.",
+      "disabled": "Désactivé",
+      "seconds": "{{value}} s"
     },
     "general": {
       "title": "Général",
@@ -164,7 +168,7 @@
         "none": "Aucun raccourci configuré",
         "notFound": "Raccourci non trouvé",
         "pressKeys": "Appuyez sur les touches...",
-        "clickToSet": "Cliquer pour definir",
+        "clickToSet": "Cliquer pour définir",
         "bindings": {
           "transcribe": {
             "name": "Raccourci de Transcription",
@@ -206,6 +210,43 @@
         "description": "Maintenez pour enregistrer, relâchez pour arrêter"
       }
     },
+    "models": {
+      "title": "Modèles de Transcription",
+      "description": "Sélectionnez un modèle de transcription ou téléchargez des modèles supplémentaires. Différents modèles offrent différents niveaux de précision et de vitesse.",
+      "tabs": {
+        "transcription": "Transcription",
+        "processing": "Traitement"
+      },
+      "yourModels": "Modèles téléchargés",
+      "availableModels": "Disponibles au téléchargement",
+      "downloaded": "Téléchargés",
+      "available": "Disponibles au Téléchargement",
+      "deleteConfirm": "Êtes-vous sûr de vouloir supprimer {{modelName}} ? Vous devrez le télécharger à nouveau pour l'utiliser.",
+      "deleteActiveConfirm": "{{modelName}} est votre modèle actif. Le supprimer arrêtera les transcriptions jusqu'à ce que vous sélectionniez un nouveau modèle. Êtes-vous sûr ?",
+      "deleteTitle": "Supprimer le modèle",
+      "filters": {
+        "all": "Tous",
+        "multiLanguage": "Multilingue",
+        "translation": "Traduction",
+        "allLanguages": "Toutes les langues"
+      },
+      "noModelsMatch": "Aucun modèle ne correspond à ce filtre.",
+      "processingModels": {
+        "title": "Modèles de traitement",
+        "description": "Enregistrez des modèles d'IA à utiliser dans les actions de post-traitement.",
+        "noModels": "Aucun modèle de traitement enregistré. Ajoutez-en un pour l'utiliser dans vos actions.",
+        "addModel": "Ajouter un modèle de traitement",
+        "provider": "Fournisseur",
+        "apiKey": "Clé API",
+        "apiKeyPlaceholder": "Saisissez la clé API",
+        "model": "Modèle",
+        "modelPlaceholder": "Choisissez ou saisissez un modèle",
+        "save": "Enregistrer",
+        "cancel": "Annuler",
+        "fetchModels": "Récupérer les modèles",
+        "alreadySaved": "Ce modèle est déjà enregistré."
+      }
+    },
     "sound": {
       "title": "Son",
       "microphone": {
@@ -227,7 +268,8 @@
       "volume": {
         "title": "Volume",
         "description": "Ajuster le volume du signal sonore"
-      }
+      },
+      "previewTheme": "Écouter le thème sonore (début puis fin)"
     },
     "advanced": {
       "title": "Avancé",
@@ -236,7 +278,8 @@
         "output": "Sortie",
         "transcription": "Transcription",
         "history": "Historique",
-        "experimental": "Expérimental"
+        "experimental": "Expérimental",
+        "cloudModels": "Modèles cloud"
       },
       "experimentalToggle": {
         "label": "Fonctionnalités Expérimentales",
@@ -388,6 +431,29 @@
         "cancel": "Annuler",
         "selectToEdit": "Sélectionnez un prompt ci-dessus pour voir et modifier ses détails.",
         "createFirst": "Cliquez sur 'Créer un nouveau prompt' ci-dessus pour créer votre premier prompt de post-traitement."
+      },
+      "actions": {
+        "title": "Actions",
+        "description": "Associez les touches Ctrl+chiffre (1-9) à des consignes personnalisées. Appuyez sur un raccourci pendant l'enregistrement pour appliquer l'action après la transcription.",
+        "noActions": "Aucune action configurée.",
+        "createFirst": "Créez votre première action pour traiter les transcriptions avec le fournisseur configuré.",
+        "addAction": "Ajouter une action",
+        "editAction": "Modifier l'action",
+        "key": "Touche",
+        "keyLabel": "Touche (1-9)",
+        "name": "Nom",
+        "namePlaceholder": "ex. Mode e-mail",
+        "prompt": "Consigne",
+        "promptPlaceholder": "ex. Mettez ce texte en forme comme un e-mail professionnel, avec formule d'appel et signature. Ajoutez des sauts de ligne entre les paragraphes.",
+        "promptTip": "Astuce : utilisez <code>${output}</code> pour insérer le texte transcrit dans votre consigne.",
+        "model": "Modèle (facultatif)",
+        "modelPlaceholder": "Choisissez un modèle",
+        "modelTip": "Choisissez un modèle propre à cette action, ou utilisez celui par défaut de la section API.",
+        "defaultModel": "Par défaut",
+        "save": "Enregistrer",
+        "cancel": "Annuler",
+        "delete": "Supprimer",
+        "maxActionsReached": "Nombre maximal de 9 actions atteint."
       }
     },
     "history": {
@@ -400,9 +466,35 @@
       "unsave": "Retirer des favoris",
       "delete": "Supprimer l'entrée",
       "deleteError": "Échec de la suppression de l'entrée. Veuillez réessayer.",
+      "reprocess": "Retraiter avec un autre modèle",
+      "reprocessing": "Retraitement...",
+      "selectModel": "Choisir un modèle",
       "originalTranscript": "Original",
       "postProcessed": "Post-traitement",
-      "action": "Action {{key}}"
+      "action": "Action {{key}}",
+      "deleteConfirm": "Supprimer cet enregistrement et sa transcription ? Cette action est définitive.",
+      "reprocessError": "Échec du retraitement. Vérifiez le modèle ou la connexion.",
+      "copyError": "Impossible de copier dans le presse-papiers",
+      "actionFailed": "L'action a échoué. Veuillez réessayer.",
+      "noText": "Pas de texte : la transcription a échoué. Utilisez le bouton de retraitement pour relancer.",
+      "emptyHint": "Maintenez {{shortcut}} et parlez pour dicter."
+    },
+    "gemini": {
+      "title": "API Gemini",
+      "description": "Utiliser l'API Gemini de Google pour la transcription dans le cloud. Nécessite une clé API.",
+      "apiKey": "Clé API",
+      "apiKeyPlaceholder": "Saisissez votre clé API Gemini",
+      "model": "Modèle",
+      "modelDescription": "Choisissez le modèle Gemini utilisé pour la transcription",
+      "apiKeyRequired": "Clé API requise",
+      "apiKeyRequiredDescription": "Saisissez votre clé API Google Gemini pour utiliser la transcription dans le cloud.",
+      "save": "Enregistrer",
+      "cancel": "Annuler",
+      "keyRejected": "Google a refusé cette clé. Vérifiez-la et réessayez.",
+      "keyCheckFailed": "Impossible de joindre Google pour vérifier la clé. Vérifiez la connexion.",
+      "checking": "Vérification...",
+      "keySavedUnchecked": "Clé enregistrée sans vérification (Google injoignable).",
+      "recommended": "{{model}} (recommandé)"
     },
     "debug": {
       "title": "Débogage",
@@ -462,14 +554,16 @@
         "description": "Ajouter un espace après la transcription collée"
       },
       "keyboardImplementation": {
-        "title": "Keyboard Implementation",
-        "description": "Choose the keyboard shortcut backend.",
-        "bindingsReset": "Keyboard shortcuts were incompatible and reset to defaults"
+        "title": "Gestion du clavier",
+        "description": "Choisissez le moteur des raccourcis clavier.",
+        "bindingsReset": "Les raccourcis clavier étaient incompatibles et ont été réinitialisés"
       },
       "paths": {
         "appData": "Données de l'application :",
         "models": "Modèles :",
-        "settings": "Paramètres :"
+        "settings": "Paramètres :",
+        "title": "Chemins de débogage",
+        "description": "Affiche les chemins et dossiers internes, pour le débogage"
       },
       "pasteDelay": {
         "title": "Délai de collage",
@@ -488,11 +582,13 @@
       },
       "exportImport": {
         "title": "Exporter / Importer les paramètres",
-        "description": "Transférer votre configuration vers un autre ordinateur",
+        "description": "Transférer votre configuration vers un autre ordinateur (les clés API ne sont pas exportées)",
         "export": "Exporter",
         "import": "Importer",
         "exportSuccess": "Paramètres exportés avec succès",
-        "importSuccess": "Paramètres importés avec succès"
+        "importSuccess": "Paramètres importés avec succès",
+        "exportFailed": "Échec de l'export",
+        "importFailed": "Échec de l'import"
       },
       "sourceCode": {
         "title": "Code source",
@@ -511,7 +607,8 @@
           "description": "Inférence haute performance du modèle de reconnaissance vocale automatique Whisper d'OpenAI",
           "details": "Parler utilise Whisper.cpp pour un traitement rapide et local de la parole en texte. Merci au travail incroyable de Georgi Gerganov et des contributeurs."
         }
-      }
+      },
+      "versionUnknown": "inconnue"
     }
   },
   "footer": {
@@ -526,7 +623,8 @@
     "downloading": "Téléchargement... {{progress}}%",
     "installing": "Installation...",
     "preparing": "Préparation...",
-    "checkForUpdates": "Rechercher des mises à jour"
+    "checkForUpdates": "Rechercher des mises à jour",
+    "updateCheckFailed": "Vérification impossible"
   },
   "common": {
     "loading": "Chargement...",
@@ -548,7 +646,13 @@
     "off": "Désactivé",
     "yes": "Oui",
     "no": "Non",
-    "noOptionsFound": "Aucune option trouvée"
+    "noOptionsFound": "Aucune option trouvée",
+    "notAvailable": "Non disponible",
+    "copyToClipboard": "Copier dans le presse-papiers",
+    "selectOption": "Choisir une option...",
+    "play": "Lecture",
+    "pause": "Pause",
+    "moreInformation": "Plus d'informations"
   },
   "accessibility": {
     "permissionsRequired": "Autorisations d'accessibilité requises",
@@ -557,7 +661,9 @@
     "dismiss": "Ignorer"
   },
   "errors": {
-    "loadDirectory": "Erreur lors du chargement du répertoire : {{error}}"
+    "loadDirectory": "Erreur lors du chargement du répertoire : {{error}}",
+    "settingUpdateFailed": "Impossible d'enregistrer ce réglage",
+    "loadDirectoryFailed": "Impossible de charger le dossier"
   },
   "appLanguage": {
     "title": "Langue de l'application",
@@ -566,6 +672,25 @@
   "overlay": {
     "transcribing": "Transcription...",
     "processing": "Traitement...",
-    "cancelConfirm": "Esc pour annuler"
+    "cancelConfirm": "Échap pour annuler",
+    "pause": "Mettre en pause",
+    "resume": "Reprendre l'enregistrement",
+    "cancel": "Annuler l'enregistrement",
+    "errors": {
+      "mic_unavailable": "Micro indisponible",
+      "no_speech": "Aucune voix captée",
+      "model_not_loaded": "Aucun modèle chargé",
+      "gemini_invalid_key": "Clé Gemini refusée",
+      "gemini_quota": "Quota Gemini dépassé",
+      "gemini_unavailable": "Gemini indisponible",
+      "gemini_blocked": "Bloqué par Gemini",
+      "timeout": "Pas de réponse",
+      "network": "Pas de connexion",
+      "post_process_failed": "Retouche IA échouée",
+      "paste_failed": "Collage impossible",
+      "transcription_failed": "Transcription échouée",
+      "post_process_not_configured": "IA non configurée",
+      "gemini_model_unavailable": "Modèle Gemini introuvable"
+    }
   }
 }

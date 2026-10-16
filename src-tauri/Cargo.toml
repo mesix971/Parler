@@ -1,6 +1,6 @@
 [package]
 name = "parler"
-version = "0.7.17"
+version = "0.10.0"
 description = "Parler"
 authors = ["cjpais"]
 edition = "2021"
@@ -114,7 +114,12 @@ tauri-utils = { git = "https://github.com/cjpais/tauri.git", branch = "handy-2.9
 tempfile = "3"
 
 [profile.release]
-lto = true
+# LTO « thin » et non complet : le LTO complet fait planter whisper.cpp sous
+# Windows (STATUS_STACK_BUFFER_OVERRUN, corrigé en amont dans le commit 5b651cc).
+lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# « unwind » et non « abort » : sinon les catch_unwind du code (moteur de
+# transcription, coordinateur) ne servent à rien et la moindre panique ferme
+# toute l'application.
+panic = "unwind"

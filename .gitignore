@@ -40,3 +40,15 @@ blob-report/
 
 # Secrets
 secrets.env
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+*.keystore
+
+# Livrables compilés (on rebuild depuis le source)
+*.exe
+*.msi

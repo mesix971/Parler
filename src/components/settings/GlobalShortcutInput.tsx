@@ -35,6 +35,22 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
   );
   const [originalBinding, setOriginalBinding] = useState<string>("");
   const shortcutRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const editingIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    editingIdRef.current = editingShortcutId;
+  }, [editingShortcutId]);
+
+  // Composant démonté en pleine saisie (changement de page…) : le raccourci
+  // suspendu pendant l'enregistrement est réactivé, sinon il resterait
+  // inactif jusqu'au redémarrage de l'application.
+  useEffect(() => {
+    return () => {
+      if (editingIdRef.current) {
+        commands.resumeBinding(editingIdRef.current).catch(console.error);
+      }
+    };
+  }, []);
   const osType = useOsType();
 
   const bindings = getSetting("bindings") || {};
@@ -111,7 +127,8 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
           "win",
           "windows",
         ];
-        const sortedKeys = recordedKeys.sort((a, b) => {
+        // Copie triée : trier l'état React sur place le modifierait en douce.
+        const sortedKeys = [...recordedKeys].sort((a, b) => {
           const aIsModifier = modifiers.includes(a.toLowerCase());
           const bIsModifier = modifiers.includes(b.toLowerCase());
           if (aIsModifier && !bIsModifier) return -1;

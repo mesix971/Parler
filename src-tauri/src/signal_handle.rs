@@ -1,4 +1,5 @@
 use crate::TranscriptionCoordinator;
+#[cfg_attr(not(unix), allow(unused_imports))]
 use log::{debug, warn};
 use tauri::{AppHandle, Manager};
 

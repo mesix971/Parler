@@ -4,6 +4,7 @@ import { Cog, FlaskConical, History, Info, Sparkles, Cpu } from "lucide-react";
 import ParlerTextLogo from "./icons/ParlerTextLogo";
 import HandyHand from "./icons/HandyHand";
 import { useSettings } from "../hooks/useSettings";
+import type { AppSettings } from "@/bindings";
 import {
   GeneralSettings,
   AdvancedSettings,
@@ -21,14 +22,14 @@ interface IconProps {
   height?: number | string;
   size?: number | string;
   className?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 interface SectionConfig {
   labelKey: string;
   icon: React.ComponentType<IconProps>;
   component: React.ComponentType;
-  enabled: (settings: any) => boolean;
+  enabled: (settings: AppSettings | null) => boolean;
 }
 
 export const SECTIONS_CONFIG = {
@@ -95,32 +96,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
   return (
     <div className="flex flex-col w-40 h-full border-e border-mid-gray/20 items-center px-2">
       <ParlerTextLogo width={120} className="m-4" />
-      <div className="flex flex-col w-full items-center gap-1 pt-2 border-t border-mid-gray/20">
+      {/* Vrais boutons dans un <nav> : la navigation marche au clavier
+          (Tab / Entrée) et est annoncée par les lecteurs d'écran. */}
+      <nav
+        aria-label={t("sidebar.navigation")}
+        className="flex flex-col w-full items-center gap-1 pt-2 border-t border-mid-gray/20"
+      >
         {availableSections.map((section) => {
           const Icon = section.icon;
           const isActive = activeSection === section.id;
 
           return (
-            <div
+            <button
+              type="button"
               key={section.id}
-              className={`flex gap-2 items-center p-2 w-full rounded-lg cursor-pointer transition-colors ${
+              aria-current={isActive ? "page" : undefined}
+              className={`flex gap-2 items-center p-2 w-full rounded-lg cursor-pointer transition-colors text-start focus-visible:outline-2 focus-visible:outline-logo-primary ${
                 isActive
                   ? "bg-logo-primary/80"
                   : "hover:bg-mid-gray/20 hover:opacity-100 opacity-85"
               }`}
               onClick={() => onSectionChange(section.id)}
             >
-              <Icon width={24} height={24} className="shrink-0" />
-              <p
+              <Icon width={24} height={24} className="shrink-0" aria-hidden />
+              <span
                 className="text-sm font-medium truncate"
                 title={t(section.labelKey)}
               >
                 {t(section.labelKey)}
-              </p>
-            </div>
+              </span>
+            </button>
           );
         })}
-      </div>
+      </nav>
     </div>
   );
 };

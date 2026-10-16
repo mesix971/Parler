@@ -14,7 +14,8 @@
     "postProcessing": "Post Process",
     "history": "History",
     "debug": "Debug",
-    "about": "About"
+    "about": "About",
+    "navigation": "Settings sections"
   },
   "onboarding": {
     "subtitle": "To get started, choose a transcription model",
@@ -116,6 +117,7 @@
     "extractingMultiple": "Extracting {{count}} models...",
     "extractingGeneric": "Extracting...",
     "downloading": "Downloading {{percentage}}%",
+    "downloadingGeneric": "Downloading...",
     "downloadingMultiple": "Downloading {{count}} models...",
     "modelReady": "Model Ready",
     "loading": "Loading {{modelName}}...",
@@ -134,6 +136,12 @@
       "languageOnly": "{{language}} Only",
       "translation": "Can translate to English",
       "translate": "Translate to English"
+    },
+    "statusTitle": "Model status: {{status}}",
+    "errors": {
+      "statusCheckFailed": "Failed to check model status",
+      "loadFailed": "Failed to load model",
+      "switchFailed": "Failed to switch model"
     }
   },
   "settings": {
@@ -260,7 +268,8 @@
       "volume": {
         "title": "Volume",
         "description": "Adjust the volume of audio feedback sounds"
-      }
+      },
+      "previewTheme": "Preview sound theme (plays start then stop)"
     },
     "advanced": {
       "title": "Advanced",
@@ -462,7 +471,13 @@
       "selectModel": "Select model",
       "originalTranscript": "Original",
       "postProcessed": "Post-processed",
-      "action": "Action {{key}}"
+      "action": "Action {{key}}",
+      "deleteConfirm": "Delete this recording and its transcription? This cannot be undone.",
+      "reprocessError": "Reprocessing failed. Check the model or your connection.",
+      "copyError": "Couldn't copy to the clipboard",
+      "actionFailed": "Action failed, please try again",
+      "noText": "No text: the transcription failed. Use the reprocess button to try again.",
+      "emptyHint": "Hold {{shortcut}} and speak to dictate."
     },
     "gemini": {
       "title": "Gemini API",
@@ -474,7 +489,12 @@
       "apiKeyRequired": "API Key Required",
       "apiKeyRequiredDescription": "Enter your Google Gemini API key to use cloud transcription.",
       "save": "Save",
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "keyRejected": "Google rejected this key. Check it and try again.",
+      "keyCheckFailed": "Couldn't reach Google to check the key. Check your connection.",
+      "checking": "Checking...",
+      "keySavedUnchecked": "Key saved without checking (Google unreachable).",
+      "recommended": "{{model}} (recommended)"
     },
     "debug": {
       "title": "Debug",
@@ -541,7 +561,9 @@
       "paths": {
         "appData": "App Data:",
         "models": "Models:",
-        "settings": "Settings:"
+        "settings": "Settings:",
+        "title": "Debug Paths",
+        "description": "Display internal file paths and directories for debugging purposes"
       },
       "pasteDelay": {
         "title": "Paste Delay",
@@ -560,11 +582,13 @@
       },
       "exportImport": {
         "title": "Export / Import Settings",
-        "description": "Transfer your configuration to another computer",
+        "description": "Transfer your configuration to another computer (API keys are not exported)",
         "export": "Export",
         "import": "Import",
         "exportSuccess": "Settings exported successfully",
-        "importSuccess": "Settings imported successfully"
+        "importSuccess": "Settings imported successfully",
+        "exportFailed": "Export failed",
+        "importFailed": "Import failed"
       },
       "sourceCode": {
         "title": "Source Code",
@@ -583,7 +607,8 @@
           "description": "High-performance inference of OpenAI's Whisper automatic speech recognition model",
           "details": "Parler uses Whisper.cpp for fast, local speech-to-text processing. Thanks to the amazing work by Georgi Gerganov and contributors."
         }
-      }
+      },
+      "versionUnknown": "unknown"
     }
   },
   "footer": {
@@ -598,7 +623,8 @@
     "downloading": "Downloading... {{progress}}%",
     "installing": "Installing...",
     "preparing": "Preparing...",
-    "checkForUpdates": "Check for updates"
+    "checkForUpdates": "Check for updates",
+    "updateCheckFailed": "Update check failed"
   },
   "common": {
     "loading": "Loading...",
@@ -620,7 +646,13 @@
     "off": "Off",
     "yes": "Yes",
     "no": "No",
-    "noOptionsFound": "No options found"
+    "noOptionsFound": "No options found",
+    "notAvailable": "Not available",
+    "copyToClipboard": "Copy to clipboard",
+    "selectOption": "Select an option...",
+    "play": "Play",
+    "pause": "Pause",
+    "moreInformation": "More information"
   },
   "accessibility": {
     "permissionsRequired": "Accessibility Permissions Required",
@@ -629,7 +661,9 @@
     "dismiss": "Dismiss"
   },
   "errors": {
-    "loadDirectory": "Error loading directory: {{error}}"
+    "loadDirectory": "Error loading directory: {{error}}",
+    "settingUpdateFailed": "Couldn't save this setting",
+    "loadDirectoryFailed": "Failed to load directory"
   },
   "appLanguage": {
     "title": "Application Language",
@@ -638,6 +672,25 @@
   "overlay": {
     "transcribing": "Transcribing...",
     "processing": "Processing...",
-    "cancelConfirm": "Esc again to cancel"
+    "cancelConfirm": "Esc again to cancel",
+    "pause": "Pause recording",
+    "resume": "Resume recording",
+    "cancel": "Cancel recording",
+    "errors": {
+      "mic_unavailable": "Microphone unavailable",
+      "no_speech": "Nothing heard",
+      "model_not_loaded": "No model loaded",
+      "gemini_invalid_key": "Gemini key rejected",
+      "gemini_quota": "Gemini quota exceeded",
+      "gemini_unavailable": "Gemini unavailable",
+      "gemini_blocked": "Blocked by Gemini",
+      "timeout": "No response",
+      "network": "No connection",
+      "post_process_failed": "AI cleanup failed",
+      "paste_failed": "Couldn't paste",
+      "transcription_failed": "Transcription failed",
+      "post_process_not_configured": "AI not configured",
+      "gemini_model_unavailable": "Gemini model not found"
+    }
   }
 }
