@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.11.0] - 2026-10-17
+
+### Ajouté
+
+- Retours à la ligne à la voix : « à la ligne », « retour à la ligne », « nouvelle ligne », « saut de ligne » (et « new line ») insèrent un retour à la ligne, « nouveau paragraphe » une ligne vide, « point à la ligne » un point puis un retour ; le mot suivant prend une majuscule (sauf « iPhone », adresses). Une commande ne compte que suivie d'une ponctuation ou en fin de dictée, pour laisser intacts « va à la ligne 12 » ou « une nouvelle ligne de produits ». Les variantes renvoyées par Gemini sont reconnues (« {à la ligne} » entre accolades, « A la ligne » sans accent).
+- Ponctuation à la voix : « point d'exclamation » et « point d'interrogation » deviennent « ! » et « ? ».
+- Hésitations françaises retirées du texte (« euh », « euuuh », « heu »…), avec les virgules qui les encadrent et la majuscule reportée sur le mot suivant.
+
+### Modifié
+
+- Modèle Gemini recommandé : `gemini-2.5-flash` (le plus rapide, et il garde les commandes dictées que `gemini-3.5-transcribe` supprime).
+- L'historique affiche les retours à la ligne des dictées.
+- Transcription à température 0 sur les modèles Gemini 2.x : une même dictée donne toujours le même texte (à 1.0, Gemini variait d'un essai à l'autre). Les Gemini 3 gardent la valeur par défaut, comme le recommande Google.
+
+### Corrigé
+
+- « Ah », « Eh », « ha » et « mm » ne sont plus retirés comme des hésitations anglaises (« Ah bon », « Eh bien », « 5 mm » restaient amputés).
+
 ## [0.10.0] - 2026-10-17
 
 ### Ajouté

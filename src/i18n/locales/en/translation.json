@@ -485,7 +485,7 @@
       "apiKey": "API Key",
       "apiKeyPlaceholder": "Enter your Gemini API key",
       "model": "Model",
-      "modelDescription": "Select which Gemini model to use for transcription",
+      "modelDescription": "Choose the Gemini model used for transcription. Gemini 2.5 Flash keeps spoken commands such as “new line”.",
       "apiKeyRequired": "API Key Required",
       "apiKeyRequiredDescription": "Enter your Google Gemini API key to use cloud transcription.",
       "save": "Save",

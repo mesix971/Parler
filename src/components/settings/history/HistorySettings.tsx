@@ -403,7 +403,7 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
                 </span>
               )}
             </div>
-            <p className="italic text-text/90 text-sm select-text cursor-text">
+            <p className="italic text-text/90 text-sm select-text cursor-text whitespace-pre-wrap">
               {entry.post_processed_text}
             </p>
           </div>
@@ -411,13 +411,13 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
             <span className="text-xs font-medium text-text/50 mb-0.5 block">
               {t("settings.history.originalTranscript")}
             </span>
-            <p className="italic text-text/50 text-sm select-text cursor-text">
+            <p className="italic text-text/50 text-sm select-text cursor-text whitespace-pre-wrap">
               {entry.transcription_text}
             </p>
           </div>
         </div>
       ) : hasText ? (
-        <p className="italic text-text/90 text-sm pb-2 select-text cursor-text">
+        <p className="italic text-text/90 text-sm pb-2 select-text cursor-text whitespace-pre-wrap">
           {entry.transcription_text}
         </p>
       ) : (

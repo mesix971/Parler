@@ -6,15 +6,15 @@ import { Dropdown } from "../../ui/Dropdown";
 import { useSettings } from "../../../hooks/useSettings";
 import { commands } from "@/bindings";
 
-/** Modèle conseillé pour la dictée : dédié à la transcription. */
-const RECOMMENDED_MODEL = "gemini-3.5-transcribe";
+/**
+ * Modèle conseillé pour la dictée : le plus rapide de nos essais, et il écrit
+ * mot pour mot les commandes « à la ligne », que Parler transforme ensuite en
+ * retours à la ligne (gemini-3.5-transcribe, lui, les supprime).
+ */
+const RECOMMENDED_MODEL = "gemini-2.5-flash";
 
 /** Liste de secours si Google est injoignable (hors ligne…). */
-const FALLBACK_MODELS = [
-  RECOMMENDED_MODEL,
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-];
+const FALLBACK_MODELS = [RECOMMENDED_MODEL, "gemini-3.5-transcribe"];
 
 /**
  * Choix du modèle Gemini utilisé pour transcrire. Affiché seulement quand
@@ -56,10 +56,14 @@ export const GeminiModelSettings: React.FC = () => {
     return null;
   }
 
-  // Le modèle actuel reste toujours proposé, même s'il n'est plus listé.
-  const ids = models.includes(currentModel)
-    ? models
-    : [currentModel, ...models];
+  // Le modèle conseillé en tête ; le modèle actuel reste toujours proposé,
+  // même s'il n'est plus listé.
+  const ordered = models.includes(RECOMMENDED_MODEL)
+    ? [RECOMMENDED_MODEL, ...models.filter((id) => id !== RECOMMENDED_MODEL)]
+    : models;
+  const ids = ordered.includes(currentModel)
+    ? ordered
+    : [currentModel, ...ordered];
   const options = ids.map((id) => ({
     value: id,
     label:

@@ -117,18 +117,26 @@ fn validate_model_name(model: &str) -> std::result::Result<(), GeminiError> {
     }
 }
 
-/// Seuls les modèles « Flash » 2.5 acceptent de désactiver la réflexion
-/// (thinkingBudget = 0) ; sur les autres (2.5 Pro…), ce réglage provoque une
-/// erreur 400. Pour une simple transcription, la réflexion n'apporte rien et
-/// ajoute de la latence.
+/// Réglages de transcription selon le modèle :
+/// - seuls les modèles « Flash » 2.5 acceptent de désactiver la réflexion
+///   (thinkingBudget = 0) ; sur les autres (2.5 Pro…), ce réglage provoque une
+///   erreur 400. Pour une simple transcription, la réflexion n'apporte rien et
+///   ajoute de la latence ;
+/// - température 0 sur les modèles 2.x : à la valeur par défaut (1.0), une même
+///   dictée sortait différemment à chaque essai (« Tirez », « tiré »,
+///   « Tire »…), ce qui rend les commandes dictées aléatoires. Google
+///   déconseille au contraire de la baisser sur les Gemini 3 (boucles,
+///   dégradation) : on la leur laisse.
 fn generation_config_for(model: &str) -> Option<GenerationConfig> {
-    if model.starts_with("gemini-2.5-flash") {
-        Some(GenerationConfig {
-            thinking_config: ThinkingConfig { thinking_budget: 0 },
-        })
-    } else {
-        None
+    if !model.starts_with("gemini-2.") {
+        return None;
     }
+    Some(GenerationConfig {
+        thinking_config: model
+            .starts_with("gemini-2.5-flash")
+            .then_some(ThinkingConfig { thinking_budget: 0 }),
+        temperature: Some(0.0),
+    })
 }
 
 #[derive(Serialize)]
@@ -165,7 +173,10 @@ struct ThinkingConfig {
 #[derive(Serialize)]
 struct GenerationConfig {
     #[serde(rename = "thinkingConfig")]
-    thinking_config: ThinkingConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -414,9 +425,9 @@ pub async fn transcribe_audio(api_key: &str, model: &str, audio_samples: &[f32])
     };
 
     let text = match generate_content(api_key, model, &request).await {
-        // Filet de sécurité : si Google refuse un jour le réglage « sans
-        // réflexion » pour ce modèle (HTTP 400), on renvoie la même requête
-        // sans lui plutôt que de faire échouer toutes les dictées.
+        // Filet de sécurité : si Google refuse un jour ces réglages (« sans
+        // réflexion », température) pour ce modèle (HTTP 400), on renvoie la
+        // même requête sans eux plutôt que de faire échouer toutes les dictées.
         Err(e)
             if e.kind == GeminiErrorKind::Other
                 && e.detail.starts_with("HTTP 400")
@@ -610,9 +621,20 @@ mod tests {
 
     #[test]
     fn thinking_disabled_only_for_flash() {
-        assert!(generation_config_for("gemini-2.5-flash").is_some());
-        assert!(generation_config_for("gemini-2.5-flash-lite").is_some());
-        assert!(generation_config_for("gemini-2.5-pro").is_none());
+        let json = |m| serde_json::to_string(&generation_config_for(m)).unwrap();
+        assert_eq!(
+            json("gemini-2.5-flash"),
+            r#"{"thinkingConfig":{"thinkingBudget":0},"temperature":0.0}"#
+        );
+        assert_eq!(
+            json("gemini-2.5-flash-lite"),
+            r#"{"thinkingConfig":{"thinkingBudget":0},"temperature":0.0}"#
+        );
+        // 2.5 Pro : réflexion obligatoire, mais température 0 quand même
+        assert_eq!(json("gemini-2.5-pro"), r#"{"temperature":0.0}"#);
+        // Gemini 3 : réglages par défaut, comme le recommande Google
+        assert_eq!(json("gemini-3.5-transcribe"), "null");
+        assert_eq!(json("gemini-3.8-flash"), "null");
     }
 
     #[test]
