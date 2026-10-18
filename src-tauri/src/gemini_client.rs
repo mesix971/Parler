@@ -117,6 +117,17 @@ fn validate_model_name(model: &str) -> std::result::Result<(), GeminiError> {
     }
 }
 
+/// Consigne de transcription. Nommer les commandes dictées aide Gemini à les
+/// reconnaître : sans cette phrase, « tiret » sortait en « tirer » (même son)
+/// et les tirets d'une liste disparaissaient ; avec elle, les dictées sans
+/// commande ne changent pas (vérifié sur de vraies dictées le 2026-10-17).
+/// `audio_toolkit::text` applique ensuite les commandes.
+const TRANSCRIPTION_PROMPT: &str =
+    "Transcribe this audio. Return only the transcript text, nothing else. \
+     The speaker may dictate French punctuation and formatting commands such as \
+     « tiret », « à la ligne », « nouveau paragraphe » or « point d'exclamation »: \
+     write these commands as the spoken words, do not apply them.";
+
 /// Réglages de transcription selon le modèle :
 /// - seuls les modèles « Flash » 2.5 acceptent de désactiver la réflexion
 ///   (thinkingBudget = 0) ; sur les autres (2.5 Pro…), ce réglage provoque une
@@ -412,10 +423,7 @@ pub async fn transcribe_audio(api_key: &str, model: &str, audio_samples: &[f32])
                     }),
                 },
                 Part {
-                    text: Some(
-                        "Transcribe this audio. Return only the transcript text, nothing else."
-                            .to_string(),
-                    ),
+                    text: Some(TRANSCRIPTION_PROMPT.to_string()),
                     inline_data: None,
                 },
             ],
@@ -617,6 +625,14 @@ mod tests {
         assert!(validate_model_name("").is_err());
         assert!(validate_model_name("../x").is_err());
         assert!(validate_model_name("a?key=1").is_err());
+    }
+
+    #[test]
+    fn transcription_prompt_is_the_tested_one() {
+        assert_eq!(
+            TRANSCRIPTION_PROMPT,
+            "Transcribe this audio. Return only the transcript text, nothing else. The speaker may dictate French punctuation and formatting commands such as « tiret », « à la ligne », « nouveau paragraphe » or « point d'exclamation »: write these commands as the spoken words, do not apply them."
+        );
     }
 
     #[test]

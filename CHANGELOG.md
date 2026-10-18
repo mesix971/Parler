@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.12.0] - 2026-10-17
+
+### Ajouté
+
+- « tiret » dicté devient « - » ; avec un retour à la ligne (« tiret à la ligne » ou « à la ligne, tiret »), la nouvelle ligne commence par « - » : listes à puces à la voix.
+
+### Modifié
+
+- La consigne envoyée à Gemini nomme les commandes dictées (« tiret », « à la ligne »…) : « tiret » n'est plus transcrit « tirer », et les tirets d'une liste ne disparaissent plus. Dictées sans commande inchangées.
+
 ## [0.11.0] - 2026-10-17
 
 ### Ajouté

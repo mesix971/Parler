@@ -266,19 +266,75 @@ static FRENCH_FILLER_PATTERN: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Commandes de retour à la ligne dictées. Gemini 2.5 Flash écrit parfois
+/// « A la ligne » sans accent : ce « A » n'est accepté qu'en majuscule, pour ne
+/// pas couper « il a la ligne fixe ».
+const LINE_COMMANDS: &str = r"point [aà] la ligne|nouveau paragraphe|new paragraph|retour [aà] la ligne|(?:à|(?-i:A)) la ligne|nouvelle ligne|saut de ligne|new line";
+
 /// Commandes de mise en page dictées (groupe 1). Elles ne comptent que suivies
 /// d'une ponctuation, d'une accolade fermante ou de la fin du texte : c'est
 /// ainsi que Gemini les écrit (pause à l'oral), alors que « va à la ligne 12 »
 /// ou « une nouvelle ligne de produits » restent du texte. Gemini 3.5
-/// Transcribe les encadre parfois (« {à la ligne} ») et Gemini 2.5 Flash
-/// écrit « A la ligne » sans accent : ce « A » n'est accepté qu'en majuscule,
-/// pour ne pas couper « il a la ligne fixe ».
+/// Transcribe les encadre parfois (« {à la ligne} »).
 static LINE_BREAK_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)[ \t]*(?:[,;:][ \t]*)?[{(\[]?[ \t]*\b(point [aà] la ligne|nouveau paragraphe|new paragraph|retour [aà] la ligne|(?:à|(?-i:A)) la ligne|nouvelle ligne|saut de ligne|new line)\b[ \t]*(?:[})\]][ \t]*[.,;:]?|[.,;:]|$)[ \t]*",
+        &[
+            r"(?i)[ \t]*(?:[,;:][ \t]*)?[{(\[]?[ \t]*\b(",
+            LINE_COMMANDS,
+            r")\b[ \t]*(?:[})\]][ \t]*[.,;:]?|[.,;:]|$)[ \t]*",
+        ]
+        .concat(),
     )
     .unwrap()
 });
+
+/// Ligne à puce dictée : « tiret à la ligne » ou « à la ligne, tiret » (le
+/// mot qui suit ouvre une ligne « - … »), ce second ordre pouvant être suivi
+/// d'un « à la ligne » de plus (« À la ligne. Tiret à la ligne. »). Devant la
+/// commande, Gemini entend parfois « tirer », « tiré », « tirez » ou « tire »
+/// (même son) : acceptés en début de phrase seulement (voir
+/// `apply_voice_commands`) ; derrière, seul « tiret » compte, pour laisser
+/// « à la ligne. Tirez sur la poignée ». Accolades de Gemini 3.5 Transcribe
+/// tolérées. Seule une virgule est absorbée devant : le « : » qui annonce une
+/// liste reste. Groupes : `word` = le mot entendu, `a` ou `b` = la commande.
+static BULLET_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    let gap = r"[ \t]*[})\]]?[ \t]*[.,;:]?[ \t]*[{(\[]?[ \t]*";
+    Regex::new(
+        &[
+            r"(?i)[ \t]*(?:,[ \t]*)?[{(\[]?[ \t]*(?:\b(?P<word>tir(?:et|er|é|ez|e))\b",
+            gap,
+            r"\b(?P<a>",
+            LINE_COMMANDS,
+            r")\b|\b(?P<b>",
+            LINE_COMMANDS,
+            r")\b",
+            gap,
+            r"\btiret\b(?:",
+            gap,
+            r"\b(?:",
+            LINE_COMMANDS,
+            r")\b)?)[ \t]*[})\]]?[ \t]*[.,;:]?[ \t]*",
+        ]
+        .concat(),
+    )
+    .unwrap()
+});
+
+/// « tiret » dicté seul (« Paris tiret Lyon »), avec la virgule ou le point
+/// que Gemini met autour (groupe `stop`) et ses éventuelles accolades.
+static DASH_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)[ \t]*,?[ \t]*[{(\[]?[ \t]*\btiret\b[ \t]*[})\]]?(?P<stop>[ \t]*[.,])?[ \t]*")
+        .unwrap()
+});
+
+/// « tiret bas », « tiret du 6 » : le nom du caractère « _ », laissé en
+/// toutes lettres.
+static UNDERSCORE_NAME_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(?i)(?:bas|du[ \t]+(?:6|six|8|huit))\b").unwrap());
+
+/// Espaces doublées ou laissées en fin de ligne par les commandes dictées.
+static EXTRA_SPACES_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[ \t]+(\n)|[ \t]{2,}").unwrap());
 
 /// Premier mot d'une ligne créée par une commande dictée.
 static LINE_START_WORD_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\n(\p{L}\S*)").unwrap());
@@ -397,11 +453,41 @@ pub fn remove_french_fillers(text: &str) -> String {
         .to_string()
 }
 
-/// Remplace « point d'exclamation » et « point d'interrogation » dictés par
-/// « ! » et « ? », précédés d'une espace à la française (sauf en début de
-/// ligne). Plusieurs à la suite se cumulent (« !!! ») et le mot suivant prend
-/// une majuscule.
+/// Remplace « tiret » dicté par « - », entouré d'espaces sauf en début ou en
+/// fin de ligne. Le point qui suit n'est absorbé qu'en début de ligne
+/// (« Tiret. Du pain ») : ailleurs, il termine la phrase (« Il manque un
+/// tiret. Merci »).
+fn replace_dashes(text: &str) -> String {
+    DASH_PATTERN
+        .replace_all(text, |caps: &regex::Captures| {
+            let (start, end) = caps.get(0).map_or((0, 0), |m| (m.start(), m.end()));
+            let (before, after) = (&text[..start], &text[end..]);
+            if UNDERSCORE_NAME_PATTERN.is_match(after) {
+                return caps[0].to_string();
+            }
+            let line_start = before.is_empty() || before.ends_with('\n');
+            let lead = if line_start { "" } else { " " };
+            let stop = match caps.name("stop") {
+                Some(m) if !line_start && m.as_str().ends_with('.') => ".",
+                _ => "",
+            };
+            let trail = if after.is_empty() || after.starts_with('\n') {
+                ""
+            } else {
+                " "
+            };
+            format!("{}-{}{}", lead, stop, trail)
+        })
+        .into_owned()
+}
+
+/// Remplace la ponctuation dictée : « tiret » par « - », « point
+/// d'exclamation » et « point d'interrogation » par « ! » et « ? », précédés
+/// d'une espace à la française (sauf en début de ligne). Plusieurs à la suite
+/// se cumulent (« !!! ») et le mot suivant prend une majuscule.
 pub fn apply_spoken_punctuation(text: &str) -> String {
+    let dashed = replace_dashes(text);
+    let text = dashed.as_str();
     let replaced = SPOKEN_PUNCTUATION_PATTERN.replace_all(text, |caps: &regex::Captures| {
         let before = &text[..caps.get(0).map_or(0, |m| m.start())];
         let space = if before.is_empty() || before.ends_with('\n') {
@@ -435,23 +521,53 @@ pub fn apply_spoken_punctuation(text: &str) -> String {
         .to_string()
 }
 
+/// Saut produit par une commande : ligne vide pour un paragraphe, point
+/// ajouté par « point à la ligne » s'il n'y en a pas déjà un.
+fn line_separator(command: &str, before: &str) -> &'static str {
+    let command = command.to_lowercase();
+    if command.contains("paragraph") {
+        "\n\n"
+    } else if command.starts_with("point") && !ends_sentence(before) {
+        ".\n"
+    } else {
+        "\n"
+    }
+}
+
 /// Remplace les commandes de mise en page dictées par de vrais retours à la
 /// ligne : « à la ligne », « retour à la ligne », « nouvelle ligne »,
 /// « saut de ligne », « new line » → retour à la ligne ; « nouveau
 /// paragraphe », « new paragraph » → ligne vide ; « point à la ligne » →
-/// point (s'il n'y en a pas déjà un) puis retour à la ligne. Le premier mot de
-/// chaque nouvelle ligne prend une majuscule.
+/// point (s'il n'y en a pas déjà un) puis retour à la ligne. Avec « tiret »
+/// (« tiret à la ligne », « à la ligne, tiret »), la nouvelle ligne commence
+/// par « - ». Le premier mot de chaque nouvelle ligne prend une majuscule
+/// (sauf après une puce : « - du pain » reste tel que dicté).
 pub fn apply_voice_commands(text: &str) -> String {
+    let bulleted = BULLET_PATTERN.replace_all(text, |caps: &regex::Captures| {
+        let before = &text[..caps.get(0).map_or(0, |m| m.start())];
+        // Homophone de « tiret » au milieu d'une phrase (« le rideau est
+        // tiré. À la ligne ») : c'est du texte, le retour à la ligne seul
+        // sera traité ensuite.
+        if let Some(word) = caps.name("word") {
+            if !word.as_str().eq_ignore_ascii_case("tiret") && !ends_sentence(before) {
+                return caps[0].to_string();
+            }
+        }
+        let command = caps
+            .name("a")
+            .or_else(|| caps.name("b"))
+            .map_or("", |m| m.as_str());
+        // En tout début de dictée, pas de ligne vide avant la puce.
+        if before.trim_end_matches([' ', '\t']).is_empty() {
+            "- ".to_string()
+        } else {
+            format!("{}- ", line_separator(command, before))
+        }
+    });
+    let text = bulleted.as_ref();
     let replaced = LINE_BREAK_PATTERN.replace_all(text, |caps: &regex::Captures| {
         let before = &text[..caps.get(0).map_or(0, |m| m.start())];
-        let command = caps[1].to_lowercase();
-        if command.contains("paragraph") {
-            "\n\n"
-        } else if command.starts_with("point") && !ends_sentence(before) {
-            ".\n"
-        } else {
-            "\n"
-        }
+        line_separator(&caps[1], before)
     });
     LINE_START_WORD_PATTERN
         .replace_all(&replaced, |caps: &regex::Captures| {
@@ -498,7 +614,21 @@ pub fn filter_transcription_output(text: &str) -> String {
     // Ponctuation dictée en dernier : passée avant, elle avalerait le point
     // de « À la ligne. Point d'exclamation » et le retour à la ligne
     // mangerait ensuite le « ! » à la place.
-    apply_spoken_punctuation(&filtered)
+    filtered = apply_spoken_punctuation(&filtered);
+
+    // Espaces doublées ou en fin de ligne (« tiret tiret », puce vide)
+    EXTRA_SPACES_PATTERN
+        .replace_all(
+            &filtered,
+            |caps: &regex::Captures| {
+                if caps.get(1).is_some() {
+                    "\n"
+                } else {
+                    " "
+                }
+            },
+        )
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -592,6 +722,118 @@ mod tests {
         assert_eq!(
             apply_voice_commands("Regarde. À la ligne. iPhone et à la ligne, https://x.fr"),
             "Regarde.\niPhone et\nhttps://x.fr"
+        );
+    }
+
+    /// « tiret » : lignes à puce avec « à la ligne », « - » sinon. Sorties
+    /// réelles de Gemini 2.5 Flash (température 0) du 2026-10-17.
+    #[test]
+    fn dictated_dashes_and_bullets() {
+        // Ta dictée : « tiret à la ligne » devant chaque ligne
+        assert_eq!(
+            filter_transcription_output(
+                "tiret à la ligne. Salut, comment ça va ? tiret à la ligne. Je vais bien. à la ligne."
+            ),
+            "- Salut, comment ça va ?\n- Je vais bien.\n"
+        );
+        // Ordre inverse, sans ponctuation (voix de synthèse)
+        assert_eq!(
+            filter_transcription_output(
+                "Liste de courses à la ligne tiret du pain à la ligne tiret du lait à la ligne tiret des œufs"
+            ),
+            "Liste de courses\n- du pain\n- du lait\n- des œufs"
+        );
+        // « tirer » entendu à la place de « tiret », devant la commande
+        assert_eq!(
+            filter_transcription_output("Je vais très bien. Tirer à la ligne. Ça va le son ?"),
+            "Je vais très bien.\n- Ça va le son ?"
+        );
+        // Avec « point à la ligne » et « nouveau paragraphe »
+        assert_eq!(
+            filter_transcription_output("Bonjour point à la ligne tiret Merci"),
+            "Bonjour.\n- Merci"
+        );
+        assert_eq!(
+            filter_transcription_output("Fin. Nouveau paragraphe, tiret, suite"),
+            "Fin.\n\n- suite"
+        );
+        // « tiret » seul
+        assert_eq!(
+            filter_transcription_output("Le trajet Paris tiret Lyon dure 2 heures."),
+            "Le trajet Paris - Lyon dure 2 heures."
+        );
+        assert_eq!(filter_transcription_output("Tiret. Du pain"), "- Du pain");
+        assert_eq!(
+            filter_transcription_output("Je vais bien tiret"),
+            "Je vais bien -"
+        );
+        // Homophones sans commande, et « tirez » après la commande : du texte
+        assert_eq!(
+            filter_transcription_output(
+                "Il faut tirer la porte. À la ligne. Tirez sur la poignée."
+            ),
+            "Il faut tirer la porte.\nTirez sur la poignée."
+        );
+    }
+
+    /// Cas limites relevés à la relecture.
+    #[test]
+    fn dictated_dashes_edge_cases() {
+        // Homophone en milieu de phrase devant un vrai retour à la ligne
+        assert_eq!(
+            filter_transcription_output("Le rideau est tiré. À la ligne. Ensuite on part"),
+            "Le rideau est tiré.\nEnsuite on part"
+        );
+        // Le « : » qui annonce la liste reste
+        assert_eq!(
+            filter_transcription_output("Liste de courses : tiret à la ligne du pain"),
+            "Liste de courses :\n- du pain"
+        );
+        // Une ligne terminée par « à la ligne » puis « tiret à la ligne »
+        assert_eq!(
+            filter_transcription_output("Salut. À la ligne. Tiret à la ligne. Bonjour"),
+            "Salut.\n- Bonjour"
+        );
+        assert_eq!(
+            filter_transcription_output("Salut à la ligne tiret à la ligne Bonjour"),
+            "Salut\n- Bonjour"
+        );
+        // Accolades de Gemini 3.5 Transcribe
+        assert_eq!(
+            filter_transcription_output("OK {tiret à la ligne} Salut"),
+            "OK\n- Salut"
+        );
+        assert_eq!(
+            filter_transcription_output("Courses. {à la ligne} {tiret} du pain"),
+            "Courses.\n- du pain"
+        );
+        assert_eq!(
+            filter_transcription_output("Paris {tiret} Lyon"),
+            "Paris - Lyon"
+        );
+        // Le point d'une vraie fin de phrase reste
+        assert_eq!(
+            filter_transcription_output("Il manque un tiret. Merci"),
+            "Il manque un -. Merci"
+        );
+        // « tiret bas », « tiret du 6 » : laissés en toutes lettres
+        assert_eq!(
+            filter_transcription_output("Mets un tiret bas et un tiret du 6."),
+            "Mets un tiret bas et un tiret du 6."
+        );
+        // Pas d'espaces doublées ni en fin de ligne
+        assert_eq!(
+            filter_transcription_output("Paris tiret tiret Lyon"),
+            "Paris - - Lyon"
+        );
+        assert_eq!(
+            filter_transcription_output("tiret à la ligne tiret à la ligne Salut"),
+            "-\n- Salut"
+        );
+        // Puce en toute fin de dictée
+        assert_eq!(
+            filter_transcription_output("Merci. Tiret à la ligne."),
+            "Merci.\n-"
         );
     }
 
