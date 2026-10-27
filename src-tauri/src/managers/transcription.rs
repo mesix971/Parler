@@ -398,7 +398,12 @@ impl TranscriptionManager {
             .is_loading
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *is_loading || self.is_model_loaded() {
+        // Un modèle chargé qui n'est pas celui des réglages (modèle local resté
+        // après un repli dont la restauration a échoué) est remplacé.
+        let selected = get_settings(&self.app_handle).selected_model;
+        if *is_loading
+            || (self.is_model_loaded() && self.get_current_model().as_deref() == Some(&selected))
+        {
             return;
         }
 
@@ -430,6 +435,41 @@ impl TranscriptionManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         current_model.clone()
+    }
+
+    /// Le modèle local téléchargé le plus précis qui connaît la langue dictée
+    /// (celle des réglages, ou celle de l'interface en détection automatique) :
+    /// il retranscrit une dictée quand Gemini échoue et que le modèle principal
+    /// est Gemini. Sans cela, un modèle anglais seul (Parakeet V2) passerait
+    /// devant le multilingue et rendrait du charabia en français.
+    pub fn local_fallback_model(&self) -> Option<String> {
+        let settings = get_settings(&self.app_handle);
+        let language = if settings.selected_language == "auto" {
+            settings
+                .app_language
+                .split(['-', '_'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            settings.selected_language
+        };
+        self.model_manager
+            .get_available_models()
+            .into_iter()
+            .filter(|m| {
+                m.is_downloaded
+                    && !matches!(m.engine_type, EngineType::GeminiApi)
+                    && m.supported_languages.contains(&language)
+            })
+            // À précision égale, le plus rapide, puis l'ordre alphabétique (stable)
+            .max_by(|a, b| {
+                a.accuracy_score
+                    .total_cmp(&b.accuracy_score)
+                    .then(a.speed_score.total_cmp(&b.speed_score))
+                    .then(b.id.cmp(&a.id))
+            })
+            .map(|m| m.id)
     }
 
     pub fn get_current_model_name(&self) -> Option<String> {
@@ -503,8 +543,12 @@ impl TranscriptionManager {
                     })?;
                 let gemini_model = settings.gemini_model.clone();
 
-                let request =
-                    crate::gemini_client::transcribe_audio(&api_key, &gemini_model, &audio);
+                let request = crate::gemini_client::transcribe_audio_with_backup(
+                    &api_key,
+                    settings.gemini_api_key_backup.as_deref(),
+                    &gemini_model,
+                    &audio,
+                );
                 let result = match tokio::runtime::Handle::try_current() {
                     // Use block_in_place to safely run async code from a tokio worker thread.
                     // Handle::block_on() panics if called directly from an async context,

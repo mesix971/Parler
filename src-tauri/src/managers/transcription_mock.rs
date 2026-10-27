@@ -49,6 +49,10 @@ impl TranscriptionManager {
         None
     }
 
+    pub fn local_fallback_model(&self) -> Option<String> {
+        None
+    }
+
     pub fn get_current_model_name(&self) -> Option<String> {
         None
     }

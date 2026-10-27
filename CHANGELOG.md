@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.16.0] - 2026-10-27
+
+### Ajouté
+
+- Les répétitions involontaires sont retirées : un groupe de mots dit deux fois de suite (« je voulais je voulais ») et un petit mot doublé (« que que », « le le »). Gemini les recopiait malgré la consigne. Restent : « très très », « nous nous », les commandes répétées, et toute répétition séparée par une ponctuation.
+
+### Modifié
+
+- Le premier modèle Gemini a 12 s pour répondre (plus pour les longues dictées) avant que Parler passe à l'autre modèle gratuit : Flash Lite mettait jusqu'à 30 s quand Google était saturé.
+
+## [0.15.0] - 2026-10-27
+
+### Modifié
+
+- Modèle Gemini conseillé et par défaut : gemini-3.5-flash-lite (500 dictées par jour sur le niveau gratuit, réflexion minimale : 1 à 4 s). gemini-2.5-flash n'est plus ouvert aux nouveaux projets Google.
+- Si le modèle choisi est saturé ou à sa limite gratuite, Parler essaie l'autre modèle gratuit (Flash Lite ↔ 3.5 Transcribe) avant la clé de secours.
+
+### Corrigé
+
+- Le repli sur le modèle local marche aussi quand Gemini est le modèle principal, sans clé, ou quand Gemini ne rend rien : le meilleur modèle local téléchargé pour la langue dictée retranscrit la dictée.
+- Toute la chaîne Gemini (modèle choisi, autre modèle, clé de secours) est bornée à 45 s avant le repli local ; l'erreur affichée est celle du premier essai (« crédits épuisés », « quota »…).
+- Un modèle resté chargé après un repli est remplacé par celui des réglages à la dictée suivante.
+
+## [0.14.0] - 2026-10-27
+
+### Ajouté
+
+- Clé Gemini de secours (payante), dans Général → API Gemini : utilisée seulement quand la clé principale (gratuite) a atteint sa limite ou n'a plus de crédits.
+
+## [0.13.0] - 2026-10-27
+
+### Ajouté
+
+- Général → API Gemini : bouton « Changer la clé » (une fois enregistrée, la clé ne se changeait plus nulle part).
+- Si Gemini échoue sur une dictée longue (crédits épuisés, quota, réseau), Parler la retranscrit avec le modèle principal au lieu de la perdre.
+- Message clair « Crédits Gemini épuisés » (HTTP 402) au lieu de « Transcription échouée ».
+
+### Modifié
+
+- Gemini rend un texte nettoyé : sans hésitations, mots répétés ni faux départs, sans rien reformuler ; les commandes dictées restent appliquées par Parler.
+
 ## [0.12.0] - 2026-10-17
 
 ### Ajouté

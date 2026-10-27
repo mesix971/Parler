@@ -485,7 +485,7 @@
       "apiKey": "Clé API",
       "apiKeyPlaceholder": "Saisissez votre clé API Gemini",
       "model": "Modèle",
-      "modelDescription": "Choisissez le modèle Gemini utilisé pour la transcription. Gemini 2.5 Flash garde les commandes dictées comme « à la ligne ».",
+      "modelDescription": "Choisissez le modèle Gemini utilisé pour la transcription. Gemini 3.5 Flash Lite a la plus grande part gratuite (500 dictées par jour) ; s'il est saturé ou à sa limite, Parler essaie Gemini 3.5 Transcribe.",
       "apiKeyRequired": "Clé API requise",
       "apiKeyRequiredDescription": "Saisissez votre clé API Google Gemini pour utiliser la transcription dans le cloud.",
       "save": "Enregistrer",
@@ -494,7 +494,13 @@
       "keyCheckFailed": "Impossible de joindre Google pour vérifier la clé. Vérifiez la connexion.",
       "checking": "Vérification...",
       "keySavedUnchecked": "Clé enregistrée sans vérification (Google injoignable).",
-      "recommended": "{{model}} (recommandé)"
+      "recommended": "{{model}} (recommandé)",
+      "apiKeyDescription": "La clé utilisée pour chaque dictée. Mettez celle d'un projet Google AI Studio sans facturation : il utilise le niveau gratuit.",
+      "changeKey": "Changer la clé",
+      "addKey": "Ajouter une clé",
+      "backupKey": "Clé de secours (payante)",
+      "backupKeyDescription": "Facultatif : la clé d'un projet avec facturation, utilisée seulement quand la clé principale a atteint sa limite gratuite ou n'a plus de crédits.",
+      "removeKey": "Retirer"
     },
     "debug": {
       "title": "Débogage",
@@ -690,7 +696,8 @@
       "paste_failed": "Collage impossible",
       "transcription_failed": "Transcription échouée",
       "post_process_not_configured": "IA non configurée",
-      "gemini_model_unavailable": "Modèle Gemini introuvable"
+      "gemini_model_unavailable": "Modèle Gemini introuvable",
+      "gemini_credits": "Crédits Gemini épuisés"
     }
   }
 }

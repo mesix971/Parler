@@ -149,6 +149,8 @@ const settingUpdaters: {
     commands.changeLongAudioThresholdSetting(value as number),
   gemini_api_key: (value) =>
     commands.changeGeminiApiKeySetting((value as string | null) ?? ""),
+  gemini_api_key_backup: (value) =>
+    commands.changeGeminiBackupApiKeySetting((value as string | null) ?? ""),
   gemini_model: (value) => commands.changeGeminiModelSetting(value as string),
   model_unload_timeout: (value) =>
     commands.setModelUnloadTimeout(value as ModelUnloadTimeout),

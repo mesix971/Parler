@@ -7,7 +7,6 @@ import React, {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { toast } from "sonner";
 import { ChevronDown, Globe, RefreshCcw, X } from "lucide-react";
 import type { ModelCardStatus } from "@/components/onboarding";
 import { ModelCard } from "@/components/onboarding";
@@ -19,6 +18,7 @@ import { commands } from "@/bindings";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
 import { Dropdown } from "@/components/ui";
+import { GeminiKeyDialog } from "../GeminiKeyDialog";
 
 // check if model supports a language based on its supported_languages list
 const modelSupportsLanguage = (model: ModelInfo, langCode: string): boolean => {
@@ -267,12 +267,9 @@ export const ModelsSettings: React.FC = () => {
   const [languageDropdownOpen, setLanguageDropdownOpen] = useState(false);
   const [languageSearch, setLanguageSearch] = useState("");
   const [showGeminiKeyDialog, setShowGeminiKeyDialog] = useState(false);
-  const [geminiKeyInput, setGeminiKeyInput] = useState("");
-  const [geminiKeyChecking, setGeminiKeyChecking] = useState(false);
-  const [geminiKeyError, setGeminiKeyError] = useState<string | null>(null);
   const languageDropdownRef = useRef<HTMLDivElement>(null);
   const languageSearchInputRef = useRef<HTMLInputElement>(null);
-  const { getSetting, updateSetting } = useSettings();
+  const { getSetting } = useSettings();
   const {
     models,
     currentModel,
@@ -364,8 +361,6 @@ export const ModelsSettings: React.FC = () => {
 
   const handleModelSelect = async (modelId: string) => {
     if (modelId === "gemini-api" && !hasGeminiKey) {
-      setGeminiKeyInput("");
-      setGeminiKeyError(null);
       setShowGeminiKeyDialog(true);
       return;
     }
@@ -377,35 +372,7 @@ export const ModelsSettings: React.FC = () => {
     }
   };
 
-  const handleGeminiKeySave = async () => {
-    const key = geminiKeyInput.trim();
-    if (!key || geminiKeyChecking) return;
-
-    // La clé est testée auprès de Google avant d'être enregistrée : une clé
-    // erronée était auparavant acceptée sans rien dire, et chaque dictée
-    // échouait ensuite en silence.
-    setGeminiKeyChecking(true);
-    setGeminiKeyError(null);
-    try {
-      const check = await commands.checkGeminiApiKey(key);
-      if (check.status === "error") {
-        if (check.error === "gemini_invalid_key") {
-          setGeminiKeyError(t("settings.gemini.keyRejected"));
-          return;
-        }
-        // Google injoignable (hors ligne…) : la clé ne peut pas être testée,
-        // on l'enregistre quand même en le signalant.
-        toast.warning(t("settings.gemini.keySavedUnchecked"));
-      }
-    } catch (error) {
-      console.error("Failed to check Gemini API key:", error);
-      toast.warning(t("settings.gemini.keySavedUnchecked"));
-    } finally {
-      setGeminiKeyChecking(false);
-    }
-
-    await updateSetting("gemini_api_key", key);
-    setShowGeminiKeyDialog(false);
+  const handleGeminiKeySaved = async () => {
     setSwitchingModelId("gemini-api");
     try {
       await selectModel("gemini-api");
@@ -688,77 +655,10 @@ export const ModelsSettings: React.FC = () => {
       ) : null}
 
       {showGeminiKeyDialog && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={() => setShowGeminiKeyDialog(false)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setShowGeminiKeyDialog(false);
-          }}
-        >
-          <div
-            className="bg-background border border-mid-gray/40 rounded-xl p-5 w-96 shadow-2xl space-y-4"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="gemini-key-dialog-title"
-            aria-describedby="gemini-key-dialog-description"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div>
-              <h3
-                id="gemini-key-dialog-title"
-                className="text-base font-semibold"
-              >
-                {t("settings.gemini.apiKeyRequired")}
-              </h3>
-              <p
-                id="gemini-key-dialog-description"
-                className="text-sm text-text/60 mt-1"
-              >
-                {t("settings.gemini.apiKeyRequiredDescription")}
-              </p>
-            </div>
-            <Input
-              autoFocus
-              type="password"
-              value={geminiKeyInput}
-              onChange={(e) => {
-                setGeminiKeyInput(e.target.value);
-                setGeminiKeyError(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleGeminiKeySave();
-              }}
-              placeholder={t("settings.gemini.apiKeyPlaceholder")}
-              aria-label={t("settings.gemini.apiKey")}
-              aria-invalid={geminiKeyError !== null}
-              className="w-full"
-            />
-            {geminiKeyError && (
-              <p className="text-sm text-red-500" role="alert">
-                {geminiKeyError}
-              </p>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowGeminiKeyDialog(false)}
-              >
-                {t("settings.gemini.cancel")}
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleGeminiKeySave}
-                disabled={!geminiKeyInput.trim() || geminiKeyChecking}
-              >
-                {geminiKeyChecking
-                  ? t("settings.gemini.checking")
-                  : t("settings.gemini.save")}
-              </Button>
-            </div>
-          </div>
-        </div>
+        <GeminiKeyDialog
+          onClose={() => setShowGeminiKeyDialog(false)}
+          onSaved={handleGeminiKeySaved}
+        />
       )}
     </div>
   );

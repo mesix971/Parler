@@ -42,6 +42,8 @@ pub enum GeminiErrorKind {
     InvalidKey,
     /// Quota ou limite de débit dépassé (HTTP 429).
     Quota,
+    /// Crédits prépayés du projet Google épuisés (HTTP 402).
+    Credits,
     /// Service Google indisponible (HTTP 5xx).
     Unavailable,
     /// Pas de réponse dans le délai imparti.
@@ -62,6 +64,7 @@ impl GeminiErrorKind {
         match self {
             GeminiErrorKind::InvalidKey => "gemini_invalid_key",
             GeminiErrorKind::Quota => "gemini_quota",
+            GeminiErrorKind::Credits => "gemini_credits",
             GeminiErrorKind::Unavailable => "gemini_unavailable",
             GeminiErrorKind::Timeout => "timeout",
             GeminiErrorKind::Network => "network",
@@ -122,11 +125,22 @@ fn validate_model_name(model: &str) -> std::result::Result<(), GeminiError> {
 /// et les tirets d'une liste disparaissaient ; avec elle, les dictées sans
 /// commande ne changent pas (vérifié sur de vraies dictées le 2026-10-17).
 /// `audio_toolkit::text` applique ensuite les commandes.
+///
+/// Depuis la 0.13.0, la transcription est « nettoyée » : l'utilisateur veut un
+/// texte qui a du sens, sans hésitations, mots répétés ni faux départs. Le
+/// texte reste le sien : rien d'ajouté, de résumé ni de reformulé.
 const TRANSCRIPTION_PROMPT: &str =
-    "Transcribe this audio. Return only the transcript text, nothing else. \
+    "Transcribe this dictation into clean written text, in the language spoken. \
+     Remove hesitations (euh, heu, hum…), stutters, words repeated by mistake and \
+     false starts: when the speaker corrects themselves, keep only the corrected \
+     version. Do not summarize, rephrase, add or translate anything: keep the \
+     speaker's own words, meaning and tone. \
      The speaker may dictate French punctuation and formatting commands such as \
      « tiret », « à la ligne », « nouveau paragraphe » or « point d'exclamation »: \
-     write these commands as the spoken words, do not apply them.";
+     always write these commands as the spoken words, where they were said, \
+     do not apply or remove them. \
+     Repeated commands are intentional: keep every occurrence. \
+     Return only the text, nothing else.";
 
 /// Réglages de transcription selon le modèle :
 /// - seuls les modèles « Flash » 2.5 acceptent de désactiver la réflexion
@@ -137,15 +151,27 @@ const TRANSCRIPTION_PROMPT: &str =
 ///   dictée sortait différemment à chaque essai (« Tirez », « tiré »,
 ///   « Tire »…), ce qui rend les commandes dictées aléatoires. Google
 ///   déconseille au contraire de la baisser sur les Gemini 3 (boucles,
-///   dégradation) : on la leur laisse.
+///   dégradation) : on la leur laisse ;
+/// - réflexion « minimale » sur les « Flash » 3.x : sur de vraies dictées
+///   (2026-10-27), 3.5 Flash Lite répondait en 1 à 4 s au lieu de 3 à 10, sans
+///   perte de qualité. Les autres (Transcribe…) gardent leurs réglages.
 fn generation_config_for(model: &str) -> Option<GenerationConfig> {
     if !model.starts_with("gemini-2.") {
-        return None;
+        return model.contains("flash").then_some(GenerationConfig {
+            thinking_config: Some(ThinkingConfig {
+                thinking_budget: None,
+                thinking_level: Some("minimal"),
+            }),
+            temperature: None,
+        });
     }
     Some(GenerationConfig {
         thinking_config: model
             .starts_with("gemini-2.5-flash")
-            .then_some(ThinkingConfig { thinking_budget: 0 }),
+            .then_some(ThinkingConfig {
+                thinking_budget: Some(0),
+                thinking_level: None,
+            }),
         temperature: Some(0.0),
     })
 }
@@ -177,8 +203,14 @@ struct SystemInstruction {
 
 #[derive(Serialize)]
 struct ThinkingConfig {
+    /// Gemini 2.5 : budget en tokens (0 = sans réflexion)
     #[serde(rename = "thinkingBudget")]
-    thinking_budget: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget: Option<u32>,
+    /// Gemini 3 et suivants : niveau (« minimal », « low »…)
+    #[serde(rename = "thinkingLevel")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_level: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -319,6 +351,8 @@ fn classify_http_error(status: reqwest::StatusCode, body: &str) -> GeminiError {
             GeminiErrorKind::InvalidKey
         }
         401 | 403 => GeminiErrorKind::InvalidKey,
+        // « Your prepayment credits are depleted » (constaté le 2026-10-27)
+        402 => GeminiErrorKind::Credits,
         404 => GeminiErrorKind::ModelNotFound,
         429 => GeminiErrorKind::Quota,
         500..=599 => GeminiErrorKind::Unavailable,
@@ -450,6 +484,120 @@ pub async fn transcribe_audio(api_key: &str, model: &str, audio_samples: &[f32])
     // Le texte dicté n'est jamais écrit dans le journal (donnée personnelle).
     debug!("Gemini transcription result length: {} chars", text.len());
     Ok(text)
+}
+
+/// L'erreur dit-elle que la clé ne peut plus servir pour l'instant (quota du
+/// niveau gratuit atteint, crédits prépayés épuisés) ? C'est le seul cas où la
+/// clé de secours est essayée : une autre clé n'aiderait pas un réseau coupé.
+fn is_exhausted(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<GeminiError>()
+        .is_some_and(|g| matches!(g.kind, GeminiErrorKind::Quota | GeminiErrorKind::Credits))
+}
+
+/// Modèle gratuit le plus généreux (500 dictées par jour, 15 par minute sur le
+/// niveau gratuit, relevé dans AI Studio le 2026-10-27), rapide et juste sur de
+/// vraies dictées.
+const FLASH_LITE_MODEL: &str = "gemini-3.5-flash-lite";
+/// Modèle dédié à la transcription : rapide, mais 25 dictées par jour et 3 par
+/// minute seulement sur le niveau gratuit.
+const TRANSCRIBE_MODEL: &str = "gemini-3.5-transcribe";
+
+/// Le modèle essayé quand celui choisi est saturé ou à sa limite : les limites
+/// gratuites sont comptées par modèle, un second modèle en ajoute donc.
+fn alternate_model(model: &str) -> &'static str {
+    if model == TRANSCRIBE_MODEL {
+        FLASH_LITE_MODEL
+    } else {
+        TRANSCRIBE_MODEL
+    }
+}
+
+/// Erreur qu'un autre modèle peut contourner : limite du modèle atteinte,
+/// modèle saturé chez Google (HTTP 503, fréquent le 2026-10-27) ou retiré
+/// (HTTP 404, comme gemini-2.5-flash pour les nouveaux projets).
+fn worth_another_model(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<GeminiError>().is_some_and(|g| {
+        matches!(
+            g.kind,
+            GeminiErrorKind::Quota | GeminiErrorKind::Unavailable | GeminiErrorKind::ModelNotFound
+        )
+    })
+}
+
+/// Temps laissé au premier modèle avant de passer à l'autre : Flash Lite a
+/// mis jusqu'à 30 s le 2026-10-27 (Google saturé) quand Transcribe répondait en
+/// 2 s. 12 s, plus 1 s par tranche de 10 s d'audio pour les longues dictées.
+fn first_try_timeout(sample_count: usize) -> Duration {
+    let audio_seconds = (sample_count / 16_000) as u64;
+    Duration::from_secs((12 + audio_seconds / 10).min(30))
+}
+
+/// Temps maximal pour toute la chaîne d'essais (modèle choisi, autre modèle,
+/// clé de secours) : au-delà, la dictée passe au modèle local plutôt que de
+/// faire attendre (chaque requête peut sinon durer jusqu'à `REQUEST_TIMEOUT`).
+const CHAIN_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Transcrit avec la clé principale (gratuite) et le modèle choisi ; s'il est
+/// saturé, retiré ou à sa limite, avec l'autre modèle gratuit ; si la clé est
+/// épuisée, avec la clé de secours (payante) quand il y en a une. En cas
+/// d'échec, l'erreur rendue est celle du premier essai : c'est elle qui dit
+/// quoi faire (« crédits épuisés », « quota »…).
+pub async fn transcribe_audio_with_backup(
+    api_key: &str,
+    backup_key: Option<&str>,
+    model: &str,
+    audio_samples: &[f32],
+) -> Result<String> {
+    let chain = async {
+        let first_try = first_try_timeout(audio_samples.len());
+        let first =
+            match tokio::time::timeout(first_try, transcribe_audio(api_key, model, audio_samples))
+                .await
+            {
+                Ok(Ok(text)) => return Ok(text),
+                Ok(Err(e)) => e,
+                Err(_) => GeminiError::new(
+                    GeminiErrorKind::Unavailable,
+                    format!("pas de réponse en {} s", first_try.as_secs()),
+                )
+                .into(),
+            };
+        let mut exhausted = is_exhausted(&first);
+
+        if worth_another_model(&first) {
+            let alternate = alternate_model(model);
+            warn!(
+                "Modèle Gemini {} indisponible ({}), essai avec {}",
+                model, first, alternate
+            );
+            match transcribe_audio(api_key, alternate, audio_samples).await {
+                Ok(text) => return Ok(text),
+                Err(e) => exhausted = exhausted || is_exhausted(&e),
+            }
+        }
+
+        let backup = backup_key
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && *b != api_key.trim());
+        if let (true, Some(backup)) = (exhausted, backup) {
+            warn!(
+                "Clé Gemini principale épuisée ({}), essai avec la clé de secours",
+                first
+            );
+            if let Ok(text) = transcribe_audio(backup, model, audio_samples).await {
+                return Ok(text);
+            }
+        }
+        Err(first)
+    };
+    match tokio::time::timeout(CHAIN_TIMEOUT, chain).await {
+        Ok(result) => result,
+        Err(_) => Err(GeminiError::new(
+            GeminiErrorKind::Timeout,
+            "aucune réponse de Gemini dans le temps imparti",
+        )
+        .into()),
+    }
 }
 
 pub async fn generate_text(
@@ -619,6 +767,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_try_grows_with_audio_length() {
+        assert_eq!(first_try_timeout(16_000 * 5), Duration::from_secs(12));
+        assert_eq!(first_try_timeout(16_000 * 60), Duration::from_secs(18));
+        assert_eq!(first_try_timeout(16_000 * 600), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn alternate_model_alternates_between_free_models() {
+        assert_eq!(alternate_model(FLASH_LITE_MODEL), TRANSCRIBE_MODEL);
+        assert_eq!(alternate_model(TRANSCRIBE_MODEL), FLASH_LITE_MODEL);
+        assert_eq!(alternate_model("gemini-3.8-flash"), TRANSCRIBE_MODEL);
+        let err = |kind| anyhow::Error::new(GeminiError::new(kind, "x"));
+        assert!(worth_another_model(&err(GeminiErrorKind::Quota)));
+        assert!(worth_another_model(&err(GeminiErrorKind::Unavailable)));
+        assert!(worth_another_model(&err(GeminiErrorKind::ModelNotFound)));
+        assert!(!worth_another_model(&err(GeminiErrorKind::Credits)));
+        assert!(!worth_another_model(&err(GeminiErrorKind::InvalidKey)));
+    }
+
+    #[test]
+    fn only_exhausted_keys_switch_to_backup() {
+        let err = |kind| anyhow::Error::new(GeminiError::new(kind, "x"));
+        assert!(is_exhausted(&err(GeminiErrorKind::Quota)));
+        assert!(is_exhausted(&err(GeminiErrorKind::Credits)));
+        assert!(!is_exhausted(&err(GeminiErrorKind::Network)));
+        assert!(!is_exhausted(&err(GeminiErrorKind::InvalidKey)));
+        assert!(!is_exhausted(&anyhow::anyhow!("autre")));
+    }
+
+    #[test]
     fn model_name_validation() {
         assert!(validate_model_name("gemini-2.5-flash").is_ok());
         assert!(validate_model_name("gemini-2.5-flash-lite").is_ok());
@@ -631,7 +809,7 @@ mod tests {
     fn transcription_prompt_is_the_tested_one() {
         assert_eq!(
             TRANSCRIPTION_PROMPT,
-            "Transcribe this audio. Return only the transcript text, nothing else. The speaker may dictate French punctuation and formatting commands such as « tiret », « à la ligne », « nouveau paragraphe » or « point d'exclamation »: write these commands as the spoken words, do not apply them."
+            "Transcribe this dictation into clean written text, in the language spoken. Remove hesitations (euh, heu, hum…), stutters, words repeated by mistake and false starts: when the speaker corrects themselves, keep only the corrected version. Do not summarize, rephrase, add or translate anything: keep the speaker's own words, meaning and tone. The speaker may dictate French punctuation and formatting commands such as « tiret », « à la ligne », « nouveau paragraphe » or « point d'exclamation »: always write these commands as the spoken words, where they were said, do not apply or remove them. Repeated commands are intentional: keep every occurrence. Return only the text, nothing else."
         );
     }
 
@@ -648,9 +826,13 @@ mod tests {
         );
         // 2.5 Pro : réflexion obligatoire, mais température 0 quand même
         assert_eq!(json("gemini-2.5-pro"), r#"{"temperature":0.0}"#);
-        // Gemini 3 : réglages par défaut, comme le recommande Google
+        // Gemini 3 : température par défaut, comme le recommande Google ;
+        // réflexion minimale sur les « Flash »
         assert_eq!(json("gemini-3.5-transcribe"), "null");
-        assert_eq!(json("gemini-3.8-flash"), "null");
+        assert_eq!(
+            json("gemini-3.5-flash-lite"),
+            r#"{"thinkingConfig":{"thinkingLevel":"minimal"}}"#
+        );
     }
 
     #[test]
@@ -669,6 +851,10 @@ mod tests {
             GeminiErrorKind::InvalidKey
         );
         assert_eq!(classify_http_error(s(429), "").kind, GeminiErrorKind::Quota);
+        assert_eq!(
+            classify_http_error(s(402), "").kind,
+            GeminiErrorKind::Credits
+        );
         assert_eq!(
             classify_http_error(s(404), "").kind,
             GeminiErrorKind::ModelNotFound

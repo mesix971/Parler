@@ -577,6 +577,101 @@ pub fn apply_voice_commands(text: &str) -> String {
         .to_string()
 }
 
+/// Petits mots qu'on ne double jamais exprès : « que que », « le le », « de
+/// de » sont des accrocs de la parole. « nous nous », « vous vous » (« nous
+/// nous voyons ») et les adverbes (« très très ») n'y sont pas : ils restent.
+const SLIP_WORDS: &[&str] = &[
+    "je", "tu", "il", "elle", "on", "ils", "elles", "le", "la", "les", "un", "une", "des", "de",
+    "du", "que", "qui", "et", "ou", "à", "au", "aux", "en", "ce", "ça", "mais", "donc", "pour",
+    "par", "sur", "dans", "avec", "pas", "ne", "se", "sa", "son", "ses", "mon", "ma", "mes", "ton",
+    "ta", "tes", "est", "c'est", "j'ai", "y",
+];
+
+/// Mots des commandes dictées : une commande répétée est voulue (« point
+/// d'exclamation » trois fois, deux puces vides), elle n'est jamais fusionnée.
+const COMMAND_WORDS: &[&str] = &[
+    "tiret",
+    "tirer",
+    "tiré",
+    "tirez",
+    "tire",
+    "ligne",
+    "paragraphe",
+    "paragraph",
+    "line",
+    "exclamation",
+    "interrogation",
+];
+
+/// Un mot sans sa ponctuation finale, en minuscules (pour comparer).
+fn bare_word(word: &str) -> String {
+    word.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’')
+        .to_lowercase()
+}
+
+/// Le mot se termine-t-il par une ponctuation (virgule, point…) ?
+fn ends_with_punctuation(word: &str) -> bool {
+    word.chars().last().is_some_and(|c| !c.is_alphanumeric())
+}
+
+/// Retire les répétitions involontaires de la parole : un groupe de 2 à 5
+/// mots dit deux fois de suite (« je voulais je voulais » → « je voulais »)
+/// et un petit mot doublé (« que que », « le le »). Gemini les recopie même
+/// quand on lui demande de les retirer (vérifié le 2026-10-27). Une
+/// ponctuation entre les deux copies (« Oui. Oui. ») marque une répétition
+/// voulue : elle reste. Le premier exemplaire est gardé (sa majuscule), avec
+/// la ponctuation qui suivait le second.
+fn remove_repetitions(text: &str) -> String {
+    let mut words: Vec<String> = text.split(' ').map(str::to_string).collect();
+    let mut i = 0;
+    while i < words.len() {
+        let mut removed = false;
+        for n in (1..=5).rev() {
+            if i + 2 * n > words.len() {
+                continue;
+            }
+            let (first, second) = (&words[i..i + n], &words[i + n..i + 2 * n]);
+            // Pas de ponctuation au sein de la première copie ni entre les deux
+            if first
+                .iter()
+                .any(|w| w.contains('\n') || ends_with_punctuation(w))
+                || second[..n - 1].iter().any(|w| ends_with_punctuation(w))
+                || second.iter().any(|w| w.contains('\n'))
+            {
+                continue;
+            }
+            let same = first
+                .iter()
+                .zip(second)
+                .all(|(a, b)| !bare_word(a).is_empty() && bare_word(a) == bare_word(b));
+            // (« d'exclamation » : le mot après l'apostrophe)
+            let has_command = first.iter().any(|w| {
+                let bare = bare_word(w);
+                let word = bare.rsplit(['\'', '’']).next().unwrap_or_default();
+                COMMAND_WORDS.contains(&word)
+            });
+            if !same
+                || has_command
+                || (n == 1 && !SLIP_WORDS.contains(&bare_word(&first[0]).as_str()))
+            {
+                continue;
+            }
+            // La ponctuation qui suivait le second exemplaire passe au premier
+            let last = &words[i + 2 * n - 1];
+            let tail: String = last.chars().skip(bare_word(last).chars().count()).collect();
+            words[i + n - 1].push_str(&tail);
+            words.drain(i + n..i + 2 * n);
+            removed = true;
+            break;
+        }
+        // Après un retrait, on regarde encore au même endroit (« que que que »)
+        if !removed {
+            i += 1;
+        }
+    }
+    words.join(" ")
+}
+
 /// Filters transcription output by removing filler words and stutter artifacts.
 ///
 /// This function cleans up raw transcription text by:
@@ -606,6 +701,9 @@ pub fn filter_transcription_output(text: &str) -> String {
     // Hésitations françaises (« euh », « heu »…)
     filtered = remove_french_fillers(filtered.trim());
 
+    // Mots ou groupes de mots répétés par accroc (« je voulais je voulais »)
+    filtered = remove_repetitions(&filtered);
+
     // Commandes dictées (« à la ligne », « nouveau paragraphe »…) après le
     // nettoyage des espaces : les retours à la ligne qu'elles insèrent ne
     // doivent plus être fusionnés en espaces, ni retirés en fin de dictée.
@@ -634,6 +732,52 @@ pub fn filter_transcription_output(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repetitions_are_removed() {
+        assert_eq!(
+            remove_repetitions("Je voulais je voulais te dire que que c'est bon."),
+            "Je voulais te dire que c'est bon."
+        );
+        assert_eq!(
+            remove_repetitions("on se voit on se voit demain"),
+            "on se voit demain"
+        );
+        assert_eq!(remove_repetitions("que que que ça"), "que ça");
+        assert_eq!(remove_repetitions("le le, chat"), "le, chat");
+    }
+
+    #[test]
+    fn deliberate_repetitions_stay() {
+        for text in [
+            "ça marche très très bien",
+            "nous nous voyons demain",
+            "vous vous trompez",
+            "Oui. Oui. C'est ça.",
+            "bye bye",
+            "Paris tiret tiret Lyon",
+        ] {
+            assert_eq!(remove_repetitions(text), text);
+        }
+    }
+
+    /// Sortie réelle de Gemini 3.5 Flash Lite (nouvelle consigne) sur une
+    /// dictée de test lue par la synthèse vocale de Google, le 2026-10-27.
+    #[test]
+    fn flash_lite_dictation_with_commands() {
+        assert_eq!(
+            filter_transcription_output(
+                "Euh, je voulais je voulais te dire que que c'est bon. tiret à la ligne. du pain, tiret à la ligne. du lait, à la ligne. Merci. Point d'exclamation."
+            ),
+            "Je voulais te dire que c'est bon.\n- du pain\n- du lait\nMerci !"
+        );
+        assert_eq!(
+            filter_transcription_output(
+                "Bon ben euh on se voit demain à 10h ? Non, à 11h. Nouveau paragraphe. À plus."
+            ),
+            "Bon ben on se voit demain à 10h ? Non, à 11h.\n\nÀ plus."
+        );
+    }
 
     /// Sorties réelles de Gemini sur un message de test lu par la voix
     /// française de Windows (relevées le 2026-10-17).

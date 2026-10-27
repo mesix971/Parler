@@ -42,6 +42,9 @@ static RECORDING_STARTED_AT: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::
 /// l'historique (en dessous, c'est un appui accidentel).
 const MIN_MEANINGFUL_RECORDING: Duration = Duration::from_millis(1500);
 
+/// Identifiant du « modèle » Gemini (transcription en ligne)
+const GEMINI_MODEL_ID: &str = "gemini-api";
+
 // Shortcut Action Trait
 pub trait ShortcutAction: Send + Sync {
     fn start(&self, app: &AppHandle, binding_id: &str, shortcut_str: &str);
@@ -540,6 +543,30 @@ async fn maybe_convert_chinese_variant(
     }
 }
 
+/// Retranscrit en local quand Gemini a échoué ou n'a rien rendu : le modèle
+/// principal s'il est local, sinon le meilleur modèle local téléchargé pour la
+/// langue dictée. None si aucun modèle local n'a pu servir.
+fn retry_locally(
+    tm: &TranscriptionManager,
+    main: &str,
+    samples: Vec<f32>,
+) -> Option<anyhow::Result<String>> {
+    let fallback = if main == GEMINI_MODEL_ID {
+        tm.local_fallback_model()?
+    } else {
+        main.to_string()
+    };
+    if let Err(e) = tm.load_model(&fallback) {
+        warn!(
+            "Failed to load local model '{}' for fallback: {}",
+            fallback, e
+        );
+        return None;
+    }
+    info!("Retranscription with local model: {}", fallback);
+    Some(tm.transcribe(samples))
+}
+
 /// Transcrit l'audio, en basculant au besoin sur le modèle « audio long » (et en
 /// le réessayant si le modèle courant ne renvoie rien sur un audio conséquent).
 /// Renvoie le résultat et indique si le modèle a été changé (à restaurer).
@@ -572,13 +599,38 @@ fn transcribe_with_fallback(
     }
 
     let transcription_time = Instant::now();
-    // Copie gardée uniquement si un nouvel essai est possible
-    let retry_samples =
-        (!switched_model && settings.long_audio_model.is_some()).then(|| samples.clone());
+    // Copie gardée pour un nouvel essai (modèle local, modèle « audio long »)
+    let retry_samples = samples.clone();
     let result = tm.transcribe(samples);
+
+    // Modèle principal encore en chargement (None) : celui des réglages
+    let main = original_model.unwrap_or(settings.selected_model.as_str());
+    // Gemini vient-il de transcrire ? Sans clé, il ne se charge pas : c'est
+    // alors le modèle principal des réglages qui le dit.
+    let used_gemini = match tm.get_current_model() {
+        Some(id) => id == GEMINI_MODEL_ID,
+        None => main == GEMINI_MODEL_ID,
+    };
 
     let transcription = match result {
         Ok(text) => text,
+        // Gemini a échoué — crédits épuisés, quota, modèle retiré, réseau
+        // coupé : on retente en local plutôt que de perdre la dictée
+        // (constaté le 2026-10-27 : HTTP 402, puis 404). Si le local échoue
+        // aussi, c'est l'erreur de Gemini qui est signalée (elle dit quoi faire).
+        Err(e) if used_gemini => {
+            warn!("Gemini failed ({}), retrying with a local model", e);
+            let local = retry_locally(tm, main, retry_samples);
+            let restore = tm.get_current_model().as_deref() != Some(main);
+            return match local {
+                Some(Ok(text)) => (Ok(text), restore),
+                Some(Err(local_err)) => {
+                    warn!("Local model fallback failed too: {}", local_err);
+                    (Err(e), restore)
+                }
+                None => (Err(e), restore),
+            };
+        }
         Err(e) => return (Err(e), switched_model),
     };
     // Le texte dicté n'est jamais écrit dans le journal (donnée personnelle).
@@ -588,11 +640,29 @@ fn transcribe_with_fallback(
         transcription.len()
     );
 
+    // Gemini n'a rien rendu sur un vrai enregistrement (réponse sans texte) :
+    // le local réessaie, sinon la dictée serait perdue (rien n'est gardé dans
+    // l'historique quand le texte est vide).
+    if transcription.is_empty() && duration_seconds > 1.0 && used_gemini {
+        info!(
+            "Gemini returned nothing for {:.1}s audio, retrying with a local model",
+            duration_seconds
+        );
+        let local = retry_locally(tm, main, retry_samples);
+        let restore = tm.get_current_model().as_deref() != Some(main);
+        return match local {
+            Some(Ok(text)) => (Ok(text), restore),
+            Some(Err(local_err)) => {
+                warn!("Local model fallback error: {}", local_err);
+                (Ok(transcription), restore)
+            }
+            None => (Ok(transcription), restore),
+        };
+    }
+
     // Fallback: if cheap model returned nothing on meaningful audio, retry with accurate model
-    if transcription.is_empty() && duration_seconds > 1.0 {
-        if let (Some(long_model_id), Some(retry_samples)) =
-            (settings.long_audio_model.as_ref(), retry_samples)
-        {
+    if transcription.is_empty() && duration_seconds > 1.0 && !switched_model {
+        if let Some(long_model_id) = settings.long_audio_model.as_ref() {
             if original_model != Some(long_model_id.as_str()) {
                 info!(
                     "Transcription empty for {:.1}s audio, retrying with long audio model: {}",
@@ -902,7 +972,11 @@ impl ShortcutAction for TranscribeAction {
 
             // Restore original model if we switched for long audio
             if switched_model {
-                if let Some(ref orig_id) = original_model {
+                // Sans modèle chargé au départ, c'est celui des réglages
+                let restore_id = original_model
+                    .clone()
+                    .or(Some(settings.selected_model.clone()));
+                if let Some(ref orig_id) = restore_id {
                     debug!("Restoring original model: {}", orig_id);
                     if let Err(e) = tm.load_model(orig_id) {
                         warn!("Failed to restore original model '{}': {}", orig_id, e);

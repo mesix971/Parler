@@ -367,6 +367,10 @@ pub struct AppSettings {
     pub long_audio_threshold_seconds: f32,
     #[serde(default)]
     pub gemini_api_key: Option<String>,
+    /// Clé de secours (projet payant), utilisée seulement quand la clé
+    /// principale (gratuite) a atteint son quota ou n'a plus de crédits
+    #[serde(default)]
+    pub gemini_api_key_backup: Option<String>,
     #[serde(default = "default_gemini_model")]
     pub gemini_model: String,
     #[serde(default)]
@@ -381,9 +385,11 @@ const SECRET_MASK: &str = "[MASQUÉ]";
 /// Remplace les clés API non vides par un masque dans une représentation JSON
 /// des réglages.
 fn mask_secrets(value: &mut serde_json::Value) {
-    if let Some(key) = value.get_mut("gemini_api_key") {
-        if key.as_str().is_some_and(|k| !k.is_empty()) {
-            *key = serde_json::Value::String(SECRET_MASK.to_string());
+    for name in ["gemini_api_key", "gemini_api_key_backup"] {
+        if let Some(key) = value.get_mut(name) {
+            if key.as_str().is_some_and(|k| !k.is_empty()) {
+                *key = serde_json::Value::String(SECRET_MASK.to_string());
+            }
         }
     }
     if let Some(keys) = value
@@ -412,6 +418,7 @@ impl AppSettings {
     pub fn without_secrets(&self) -> AppSettings {
         let mut copy = self.clone();
         copy.gemini_api_key = None;
+        copy.gemini_api_key_backup = None;
         for key in copy.post_process_api_keys.values_mut() {
             key.clear();
         }
@@ -424,6 +431,7 @@ impl AppSettings {
     /// jamais du fichier, qui peut venir d'un tiers.
     pub fn sanitize_import(mut imported: AppSettings, current: &AppSettings) -> AppSettings {
         imported.gemini_api_key = current.gemini_api_key.clone();
+        imported.gemini_api_key_backup = current.gemini_api_key_backup.clone();
         imported.post_process_api_keys = current.post_process_api_keys.clone();
         imported.external_script_path = current.external_script_path.clone();
         if imported.paste_method == PasteMethod::ExternalScript
@@ -684,7 +692,9 @@ fn default_long_audio_threshold_seconds() -> f32 {
 }
 
 fn default_gemini_model() -> String {
-    "gemini-2.5-flash".to_string()
+    // gemini-2.5-flash n'est plus ouvert aux nouveaux projets Google ; celui-ci
+    // a la plus grande part gratuite (500 dictées par jour, 2026-10-27)
+    "gemini-3.5-flash-lite".to_string()
 }
 
 fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
@@ -874,6 +884,7 @@ pub fn get_default_settings() -> AppSettings {
         long_audio_model: None,
         long_audio_threshold_seconds: default_long_audio_threshold_seconds(),
         gemini_api_key: None,
+        gemini_api_key_backup: None,
         gemini_model: default_gemini_model(),
         post_process_actions: Vec::new(),
         saved_processing_models: Vec::new(),
@@ -1084,6 +1095,7 @@ mod tests {
     fn settings_with_secrets() -> AppSettings {
         let mut settings = get_default_settings();
         settings.gemini_api_key = Some("cle-test-gemini-123".to_string());
+        settings.gemini_api_key_backup = Some("cle-test-secours-789".to_string());
         settings
             .post_process_api_keys
             .insert("openai".to_string(), "cle-test-openai-456".to_string());
@@ -1094,6 +1106,7 @@ mod tests {
     fn debug_output_masks_api_keys() {
         let output = format!("{:?}", settings_with_secrets());
         assert!(!output.contains("cle-test-gemini-123"));
+        assert!(!output.contains("cle-test-secours-789"));
         assert!(!output.contains("cle-test-openai-456"));
         assert!(output.contains(SECRET_MASK));
     }
@@ -1102,6 +1115,7 @@ mod tests {
     fn export_copy_has_no_secret() {
         let exported = settings_with_secrets().without_secrets();
         assert!(exported.gemini_api_key.is_none());
+        assert!(exported.gemini_api_key_backup.is_none());
         assert!(exported
             .post_process_api_keys
             .values()
@@ -1113,6 +1127,7 @@ mod tests {
         let current = settings_with_secrets();
         let mut imported = get_default_settings();
         imported.gemini_api_key = Some("cle-du-fichier".to_string());
+        imported.gemini_api_key_backup = Some("cle-du-fichier-2".to_string());
         imported.external_script_path = Some("C:/malveillant.exe".to_string());
         imported.paste_method = PasteMethod::ExternalScript;
         if let Some(p) = imported
@@ -1134,6 +1149,7 @@ mod tests {
         let result = AppSettings::sanitize_import(imported, &current);
 
         assert_eq!(result.gemini_api_key, current.gemini_api_key);
+        assert_eq!(result.gemini_api_key_backup, current.gemini_api_key_backup);
         assert_eq!(result.external_script_path, None);
         assert_ne!(result.paste_method, PasteMethod::ExternalScript);
         let openai = result.post_process_provider("openai").unwrap();

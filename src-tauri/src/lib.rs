@@ -374,6 +374,7 @@ pub fn run(cli_args: CliArgs) {
         commands::history::update_recording_retention_period,
         commands::history::reprocess_history_entry,
         commands::gemini::change_gemini_api_key_setting,
+        commands::gemini::change_gemini_backup_api_key_setting,
         commands::gemini::change_gemini_model_setting,
         commands::gemini::check_gemini_api_key,
         commands::gemini::list_gemini_transcription_models,

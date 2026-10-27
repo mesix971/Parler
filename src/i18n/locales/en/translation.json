@@ -485,7 +485,7 @@
       "apiKey": "API Key",
       "apiKeyPlaceholder": "Enter your Gemini API key",
       "model": "Model",
-      "modelDescription": "Choose the Gemini model used for transcription. Gemini 2.5 Flash keeps spoken commands such as “new line”.",
+      "modelDescription": "Choose the Gemini model used for transcription. Gemini 3.5 Flash Lite has the largest free allowance (500 dictations a day); when it is busy or at its limit, Parler tries Gemini 3.5 Transcribe.",
       "apiKeyRequired": "API Key Required",
       "apiKeyRequiredDescription": "Enter your Google Gemini API key to use cloud transcription.",
       "save": "Save",
@@ -494,7 +494,13 @@
       "keyCheckFailed": "Couldn't reach Google to check the key. Check your connection.",
       "checking": "Checking...",
       "keySavedUnchecked": "Key saved without checking (Google unreachable).",
-      "recommended": "{{model}} (recommended)"
+      "recommended": "{{model}} (recommended)",
+      "apiKeyDescription": "The key used for every dictation. Use one from a Google AI Studio project without billing: it uses the free tier.",
+      "changeKey": "Change key",
+      "addKey": "Add key",
+      "backupKey": "Backup key (paid)",
+      "backupKeyDescription": "Optional: the key of a project with billing, used only when the main key has reached its free limit or run out of credits.",
+      "removeKey": "Remove"
     },
     "debug": {
       "title": "Debug",
@@ -690,7 +696,8 @@
       "paste_failed": "Couldn't paste",
       "transcription_failed": "Transcription failed",
       "post_process_not_configured": "AI not configured",
-      "gemini_model_unavailable": "Gemini model not found"
+      "gemini_model_unavailable": "Gemini model not found",
+      "gemini_credits": "Gemini credits depleted"
     }
   }
 }

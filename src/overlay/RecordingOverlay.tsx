@@ -15,6 +15,7 @@ const KNOWN_ERROR_CODES = [
   "model_not_loaded",
   "gemini_invalid_key",
   "gemini_quota",
+  "gemini_credits",
   "gemini_unavailable",
   "gemini_blocked",
   "gemini_model_unavailable",
